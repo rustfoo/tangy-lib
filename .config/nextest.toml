@@ -1,0 +1,6 @@
+# JUnit reports from this profile are the evidence for assurance/assertions.toml.
+[profile.ci]
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"

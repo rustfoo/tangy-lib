@@ -1,0 +1,12 @@
+{
+  "kty": "EC",
+  "crv": "P-521",
+  "x": "AdAC-Zz4Wlb44ZNaFnAXn-VhEl_VZa_rIF0N6ZRZV4r-S-gANVyj_zWl6D2j1K-OKDymQqTrGsbVTBQGQ1ky1_mQ",
+  "y": "AA-OAKP_K0aLnhLZE5PgB4UpTfmB13gpmCSc76T1ahGJjqxNfVgT6XgbxVcc8_qDwIQ0WfOt0tDhuMrl6wSCDP6d",
+  "d": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABI0VniavN7wEjRWeJq83v",
+  "alg": "ES512",
+  "key_ops": [
+    "sign",
+    "verify"
+  ]
+}

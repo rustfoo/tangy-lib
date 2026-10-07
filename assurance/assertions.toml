@@ -1,0 +1,126 @@
+# Assertions this library makes about itself.
+#
+# Each assertion is supported by tests tagged in code with a doc comment
+# directly above the test, e.g. `/// Assures: KEY-PERM-001` in Rust or
+# `# Assures: INTEROP-PREFIX-001` in Python. CI runs
+# `scripts/check-assurance.py`, which fails unless every assertion has at least
+# `min_evidence` tagged tests that passed. Skipped or missing tests do not count.
+# See assurance/README.md.
+
+[[assertion]]
+id = "ADV-SIG-001"
+statement = "Advertisements are JWS-signed by every advertised ES512 key, signatures verify over the exact wire bytes, and tampering is detected."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-PRIV-001"
+statement = "Advertisements, recovery responses, error messages and direct JWK/library debug output never expose private key scalars."
+min_evidence = 6
+
+[[assertion]]
+id = "REC-CORRECT-001"
+statement = "Recovery responses match independently generated vectors, and a blinded client recovers its original shared point."
+min_evidence = 2
+
+[[assertion]]
+id = "REQ-REJECT-001"
+statement = "Malformed or invalid recovery requests (bad JSON, wrong curve or key type, off-curve points, private-key operations) return a typed error, never a response or a panic."
+min_evidence = 2
+
+[[assertion]]
+id = "KEY-LOAD-001"
+statement = "Invalid, incomplete or unreadable key material fails initialisation; no key is silently skipped."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-STORE-001"
+statement = "Generated keys persist with stable identities across restarts, and existing key files are never overwritten or modified, including by failed initialisation; leftover temporary files are ignored."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-PERM-001"
+statement = "On Unix, key files are restricted from creation, have final mode 0440 (owner and group read), and never require changing the process umask."
+min_evidence = 1
+required_reports = ["linux"]
+
+[[assertion]]
+id = "KEY-ID-001"
+statement = "Key IDs are RFC 7638 thumbprints that match independently computed values and ignore optional metadata."
+min_evidence = 1
+
+[[assertion]]
+id = "KEY-GEN-001"
+statement = "Key generation produces a usable P-521 ES512 signing key and ECMR recovery key, and fails closed when the entropy source fails."
+min_evidence = 2
+
+[[assertion]]
+id = "ERR-DIAG-001"
+statement = "Errors identify the failing key, path or operation and preserve the underlying cause."
+min_evidence = 4
+
+[[assertion]]
+id = "INTEROP-001"
+statement = "A stock Clevis client can encrypt against the library's advertisements and decrypt through its recovery endpoint, with one or two signing keys."
+min_evidence = 1
+
+[[assertion]]
+id = "KEY-VALID-001"
+statement = "Active and rotated stored keys receive curve, key type, scalar/public-point, algorithm and required-operation validation."
+min_evidence = 2
+
+[[assertion]]
+id = "KEY-DUP-001"
+statement = "Every duplicate identity fails with both origins, including identical copies and conflicting metadata across active and rotated sets."
+min_evidence = 2
+
+[[assertion]]
+id = "KEY-PATH-001"
+statement = "Like Tang, store roots and key files are read through symlinks and junctions, and key entries must resolve to regular files."
+min_evidence = 2
+required_reports = ["linux", "windows"]
+
+[[assertion]]
+id = "KEY-PUBLISH-001"
+statement = "Initialization succeeds only after both keys are persisted; failures remove files created by that call, and crashes leave only complete key files."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-ROTATE-001"
+statement = "Rotated keys remain recoverable, stay unadvertised and sign the active payload only when selected."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-PERM-WINDOWS-001"
+statement = "Generated Windows key files inherit the secured directory ACL."
+min_evidence = 1
+required_reports = ["windows"]
+
+[[assertion]]
+id = "INTEROP-ROTATE-001"
+statement = "Stock Clevis decrypts pre-rotation bindings and enrolls with the current thumbprint; JOSE verifies an old signer on the active payload, while Clevis rejects an absent old thumbprint."
+min_evidence = 1
+required_reports = ["interop"]
+
+[[assertion]]
+id = "ADV-OPS-001"
+statement = "Advertisements expose only verify for signing keys and deriveKey for recovery keys, omitting recovery use metadata even when stored permissions include extra operations or use sig; stock Clevis can enroll and recover with those keys."
+min_evidence = 1
+required_reports = ["linux", "interop"]
+
+[[assertion]]
+id = "KEY-PERM-ROLLBACK-001"
+statement = "On Unix, failure to set either new key file's permissions removes files created by that initialization, preserves existing files and the original error, and allows a clean retry."
+min_evidence = 1
+required_reports = ["linux"]
+
+[[assertion]]
+id = "INTEROP-PREFIX-001"
+statement = "The local tool installer creates private directories, reuses safe caller-owned installations, and rejects unsafe ownership, writable paths, symlink traversal and unsafe contents before executing package tools."
+min_evidence = 12
+required_reports = ["installer"]
+
+[[assertion]]
+id = "INTEROP-PACKAGES-001"
+statement = "The local tool installer extracts only RPMs from the successful download attempt, excluding cached packages and partial downloads before an archive retry."
+min_evidence = 1
+required_reports = ["installer"]
