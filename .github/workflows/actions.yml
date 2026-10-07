@@ -1,7 +1,6 @@
 name: Build and Run
 
-on: 
-  push
+on: [push, pull_request]
 
 jobs:
   rust-stable:
@@ -14,8 +13,10 @@ jobs:
 
     - name: Build & Test
       run: |
-        cargo build --release
-        cargo test
+        cargo fmt --check
+        cargo check --locked --all-targets
+        cargo build --locked --release
+        cargo test --locked
 
   rust-stable-windows:
     runs-on: windows-latest
@@ -27,8 +28,9 @@ jobs:
 
     - name: Build & Test
       run: |
-        cargo build --release
-        cargo test
+        cargo check --locked --all-targets
+        cargo build --locked --release
+        cargo test --locked
 
 
   rust-msrv:
@@ -41,5 +43,21 @@ jobs:
 
     - name: Build & Test
       run: |
-        cargo build --release
-        cargo test
+        cargo check --locked --all-targets
+        cargo build --locked --release
+        cargo test --locked
+
+  clevis-interop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Install interoperability tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clevis jose python3 curl
+    - name: Check independent fixtures and Clevis recovery
+      run: |
+        python3 scripts/check-fixtures.py
+        cargo test --locked --features interop --test clevis

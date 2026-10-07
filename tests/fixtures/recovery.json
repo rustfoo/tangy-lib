@@ -1,0 +1,46 @@
+[
+  {
+    "request": {
+      "kty": "EC",
+      "crv": "P-521",
+      "x": "AMaFjga3BATpzZ4-y2YjlbRCnGSBOQU_tSH4KK9ga009uqFLXnfv51ko_h3BJ6L_qN4zSLPBhWpCm_l-fjHC5b1m",
+      "y": "ARg5KWp4mjvABFyKX7QsfRvZmPVESVebRGgXr70XJz5mLJfucple9CZAxVC5AT-tB2E1PHCGonLCQIi-lHaf0WZQ",
+      "alg": "ECMR",
+      "key_ops": [
+        "deriveKey"
+      ]
+    },
+    "response": {
+      "kty": "EC",
+      "crv": "P-521",
+      "x": "ASa1DOpfB9-Qe1zkbG6HAZ_DC2FNUBeR6e3kgLgHF8xC8JZM1EsiGjkvTRk0paH_Oat8OSGSRPD0-PsXFAvNuXCd",
+      "y": "AaO_WH8pzC__37gCuCJdgtIbO6IK4XLfyjAjuJovvfksoMigvFwpyLKwWhIfE8lQqPR7CMxG2LRLXJIubFjSDMDH",
+      "alg": "ECMR",
+      "key_ops": [
+        "deriveKey"
+      ]
+    }
+  },
+  {
+    "request": {
+      "kty": "EC",
+      "crv": "P-521",
+      "x": "ABAOZHCCQQzldWZk6fhnr81CTjb9aHCjjEJpBzvFVqfSNZDipzE3ApgXzk0VQ6fE1VoDmRSPsyiz2fLy9M9VhPrV",
+      "y": "AQnCV6dw2ojuA0TLANHitiSuyDTo7iaEWAHXhV6G7i-YZruEF3-3J-xg9s2rdAcqd6Xd80JUG5pl2wv3LoowpyRX",
+      "alg": "ECMR",
+      "key_ops": [
+        "deriveKey"
+      ]
+    },
+    "response": {
+      "kty": "EC",
+      "crv": "P-521",
+      "x": "AVWvdTySzFHCzvO4_LwI1JEuVB4fS5qtn74_y3Uu4LybsVBT5ZEkDp39KosyaUxDdvmwGpVQcCwQPCMtLeopwxFz",
+      "y": "ADd8jwv3sga66ayIY5IrmWAYS4NHEUXVNZVivZJYNnbmltP95Z7bkqcZ6wPhG0ZuymFvqm8jDUsm2jC1pGshHAsu",
+      "alg": "ECMR",
+      "key_ops": [
+        "deriveKey"
+      ]
+    }
+  }
+]

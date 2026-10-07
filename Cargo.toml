@@ -1,12 +1,20 @@
 [package]
 name = "tangy-lib"
 description = "Tang protocol library implementation"
-version = "0.1.11"
+version = "0.2.0-alpha.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Martyn P <martyn@datasync.dev>"]
 repository = "https://github.com/martynp/tangy-lib"
-readme = "readme.md"
+readme = "README.md"
+
+[features]
+# Opt-in tests requiring Clevis, JOSE, Python 3, and loopback networking.
+interop = []
+
+[[test]]
+name = "clevis"
+required-features = ["interop"]
 
 [dependencies]
 p521 = { version = ">=0.13.3", features = ["ecdh", "ecdsa", "jwk"] }
