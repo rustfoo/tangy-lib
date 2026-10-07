@@ -10,11 +10,14 @@ jobs:
     
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
 
     - name: Build & Test
       run: |
         cargo fmt --check
         cargo check --locked --all-targets
+        cargo clippy --locked --all-targets --all-features -- -D warnings
         cargo build --locked --release
         cargo test --locked
 

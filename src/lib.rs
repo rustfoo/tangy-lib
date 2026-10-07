@@ -1,3 +1,23 @@
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+//! Tang advertisements and P-521 message recovery with typed errors.
+//!
+//! ```
+//! use tangy_lib::{create_new_key_set, KeySource, Result, TangyLib};
+//!
+//! fn initialize() -> Result<TangyLib> {
+//!     let generated = create_new_key_set()?;
+//!     let keys: Vec<&str> = generated.iter().map(String::as_str).collect();
+//!     let server = TangyLib::init(KeySource::Vector(&keys))?;
+//!     let _advertisement = server.adv(None)?;
+//!     Ok(server)
+//! }
+//! # initialize()?;
+//! # Ok::<(), tangy_lib::Error>(())
+//! ```
+
+mod error;
+pub use error::{Error, JsonError, KeyLocation, Result};
+
 use std::{
     collections::HashMap,
     fs::File,
@@ -6,18 +26,43 @@ use std::{
     str::FromStr,
 };
 
-use base64ct::Encoding;
-use ecdsa::SigningKey;
-use elliptic_curve::{rand_core::OsRng, JwkEcKey};
-use p521::ecdsa;
+use base64ct::{Base64UrlUnpadded, Encoding};
+use elliptic_curve::{
+    rand_core::{CryptoRngCore, OsRng, SeedableRng},
+    sec1::ToEncodedPoint,
+    JwkEcKey,
+};
+use p521::ecdsa::{self, signature::RandomizedSigner, SigningKey};
+use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use sha2::Digest;
 
 #[derive(Debug)]
 pub struct TangyLib {
-    keys: std::collections::HashMap<String, MyJwkEcKey>,
-    signing_keys: Vec<MyJwkEcKey>,
+    keys: HashMap<String, StoredKey>,
     default_adv: String,
+}
+
+// Only public JSON is retained; private material is parsed once at init.
+#[derive(Debug)]
+struct StoredKey {
+    public: MyJwkEcKey,
+    material: KeyMaterial,
+}
+
+// Avoid formatting crypto private keys, including through TangyLib's Debug.
+enum KeyMaterial {
+    Signing(SigningKey),
+    Recovery(p521::SecretKey),
+}
+
+impl std::fmt::Debug for KeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Signing(_) => "Signing([REDACTED])",
+            Self::Recovery(_) => "Recovery([REDACTED])",
+        })
+    }
 }
 
 #[derive(PartialEq)]
@@ -27,7 +72,7 @@ pub enum KeySource<'a> {
 }
 
 impl TangyLib {
-    pub fn init(source: KeySource) -> Result<Self, std::io::Error> {
+    pub fn init(source: KeySource) -> Result<Self> {
         Self::init_with_key_writer(source, create_key_file)
     }
 
@@ -36,91 +81,70 @@ impl TangyLib {
     fn init_with_key_writer<W: Write>(
         source: KeySource,
         mut create: impl FnMut(&Path) -> io::Result<W>,
-    ) -> io::Result<Self> {
+    ) -> Result<Self> {
         let mut loaded_keys = match source {
             KeySource::LocalDir(dir) => load_keys_from_dir(dir)?,
             KeySource::Vector(keys) => load_keys_from_vec(keys)?,
         };
 
-        let ecmr_exists = loaded_keys
-            .values()
-            .any(|v| v.alg.as_deref() == Some("ECMR"));
-        let es512_exists = loaded_keys
-            .values()
-            .any(|v| v.alg.as_deref() == Some("ES512"));
-
-        if (!ecmr_exists && es512_exists) || (ecmr_exists && !es512_exists) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Key loading file error",
-            ));
-        }
-
-        if !ecmr_exists && !es512_exists {
-            match source {
-                KeySource::LocalDir(dir) => {
-                    let keys = create_new_key_set();
-                    for k in keys.iter() {
-                        let jwk: MyJwkEcKey = serde_json::from_str(k).map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("Unable to create new JWK: {e}"),
-                            )
+        if loaded_keys.is_empty() {
+            if let KeySource::LocalDir(dir) = source {
+                for json in create_new_key_set()? {
+                    let jwk = parse_stored_key(&json)?;
+                    let kid = jwk.thumbprint()?;
+                    let key = validate_stored_key(jwk, &kid)?;
+                    let path = dir.join(format!("{kid}.jwk"));
+                    let mut file = create(&path).map_err(|source| Error::KeyWrite {
+                        path: path.clone(),
+                        operation: "create",
+                        source,
+                    })?;
+                    file.write_all(json.as_bytes())
+                        .map_err(|source| Error::KeyWrite {
+                            path,
+                            operation: "write",
+                            source,
                         })?;
-                        let thumbprint = jwk.thumbprint();
-                        let path = dir.join(format!("{}.jwk", thumbprint));
-                        let mut file = create(&path)?;
-                        file.write_all(k.as_bytes())?;
-                        loaded_keys.insert(thumbprint, jwk);
-                    }
-                }
-                KeySource::Vector(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "ES512 and ECMR keys not present in input vector",
-                    ));
+                    loaded_keys.insert(kid, key);
                 }
             }
         }
 
-        let signing_keys: Vec<MyJwkEcKey> = loaded_keys
+        let signing = !loaded_keys
             .values()
-            .filter(|key| key.alg.as_deref() == Some("ES512"))
-            .cloned()
-            .collect();
-
-        if signing_keys.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Signing key not found",
-            ));
+            .any(|key| matches!(key.material, KeyMaterial::Signing(_)));
+        let recovery = !loaded_keys
+            .values()
+            .any(|key| matches!(key.material, KeyMaterial::Recovery(_)));
+        if signing || recovery {
+            return Err(Error::MissingKeys { signing, recovery });
         }
-
         let mut tangy = Self {
             keys: loaded_keys,
-            signing_keys,
-            default_adv: "".into(),
+            default_adv: String::new(),
         };
-
         tangy.default_adv = tangy.adv_internal(None)?;
-
         Ok(tangy)
     }
 
-    pub fn adv(&self, skid: Option<&str>) -> Result<String, std::io::Error> {
-        if skid.is_none() {
-            return Ok(self.default_adv.to_owned());
+    pub fn adv(&self, skid: Option<&str>) -> Result<String> {
+        match skid {
+            None => Ok(self.default_adv.clone()),
+            Some(_) => self.adv_internal(skid),
         }
-        self.adv_internal(skid)
     }
 
-    pub fn adv_internal(&self, skid: Option<&str>) -> Result<String, std::io::Error> {
-        #[derive(serde::Serialize)]
+    pub fn adv_internal(&self, skid: Option<&str>) -> Result<String> {
+        self.adv_with_rng(skid, &mut OsRng)
+    }
+
+    fn adv_with_rng(&self, skid: Option<&str>, entropy: &mut impl CryptoRngCore) -> Result<String> {
+        #[derive(Serialize)]
         struct Signature {
             protected: String,
             signature: String,
         }
-        #[derive(serde::Serialize)]
+        #[derive(Serialize)]
         struct Advertise {
             payload: String,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,168 +154,159 @@ impl TangyLib {
             #[serde(skip_serializing_if = "Option::is_none")]
             signatures: Option<Vec<Signature>>,
         }
-
-        #[derive(serde::Serialize)]
-        struct Payload {
-            keys: Vec<MyJwkEcKey>,
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            keys: Vec<&'a MyJwkEcKey>,
         }
-
-        let keys: Vec<&MyJwkEcKey> = self.keys.values().collect();
 
         if let Some(kid) = skid {
-            let key = self.keys.get(kid).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("Requested signing key {} not found", kid),
-                )
-            })?;
-            require_operation(key, "ES512", "sign")?;
+            let key = self
+                .keys
+                .get(kid)
+                .ok_or_else(|| Error::KeyNotFound { kid: kid.into() })?;
+            if !matches!(key.material, KeyMaterial::Signing(_)) {
+                return Err(Error::ForbiddenOperation {
+                    kid: kid.into(),
+                    algorithm: "ES512",
+                    operation: "sign",
+                });
+            }
         }
-        // Like Tang, retain signatures for all advertised verification keys.
-        // Clevis verifies all of them even when a particular key was requested.
-        let signing_keys = &self.signing_keys;
 
-        let payload = base64ct::Base64UrlUnpadded::encode_string(
-            serde_json::to_string(&Payload {
-                keys: keys
-                    .iter()
-                    .map(|v| {
-                        let mut k = v.to_public_key();
-                        let mut ops = k.key_ops.take();
-                        if let Some(ops) = &mut ops {
-                            ops.retain(|v| *v != "sign");
-                        }
-                        k.key_ops = ops;
-                        k
-                    })
-                    .collect(),
-            })
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Unable to encode adv message: {e}"),
-                )
-            })?
-            .as_bytes(),
-        );
-
-        // As per tang reference implementation
-        let protected = base64ct::Base64UrlUnpadded::encode_string(
-            r#"{"alg":"ES512","cty":"jwk-set+json"}"#.as_bytes(),
-        );
-
-        let signing_keys: Vec<SigningKey> = signing_keys
-            .iter()
-            .map(|k| {
-                require_operation(k, "ES512", "sign")?;
-                let secret = k
-                    .try_to_jwk_ec_key(false)?
-                    .to_secret_key::<p521::NistP521>()
-                    .map_err(|_| invalid_data("Invalid signing key"))?;
-                SigningKey::from_bytes(&secret.to_bytes())
-                    .map_err(|_| invalid_data("Invalid signing key"))
-            })
-            .collect::<io::Result<_>>()?;
-
-        // The protected and payload fields are signed, as base64url encoded string
-        // joined with a period.
-        let to_sign = format!("{}.{}", &protected, &payload);
-
-        let signatures: Vec<ecdsa::Signature> = signing_keys
-            .iter()
-            .map(|k| {
-                ecdsa::signature::Signer::try_sign(k, to_sign.as_bytes())
-                    .map_err(|_| io::Error::other("Advertisement signing failed"))
-            })
-            .collect::<io::Result<_>>()?;
-
-        if signatures.len() == 1 {
-            serde_json::to_string(&Advertise {
+        let payload = Base64UrlUnpadded::encode_string(&serialize(
+            &Payload {
+                keys: self.keys.values().map(|key| &key.public).collect(),
+            },
+            "advertisement payload",
+        )?);
+        let protected =
+            Base64UrlUnpadded::encode_string(r#"{"alg":"ES512","cty":"jwk-set+json"}"#.as_bytes());
+        let to_sign = format!("{protected}.{payload}");
+        let mut rng = crypto_rng(entropy, "advertisement signing")?;
+        // Like Tang, retain signatures for every advertised verification key.
+        let mut signatures = Vec::new();
+        for (kid, key) in &self.keys {
+            if let KeyMaterial::Signing(signing) = &key.material {
+                let signature: ecdsa::Signature = signing
+                    .try_sign_with_rng(&mut rng, to_sign.as_bytes())
+                    .map_err(|source| Error::Signing {
+                        kid: kid.clone(),
+                        source,
+                    })?;
+                signatures.push(Signature {
+                    protected: protected.clone(),
+                    signature: Base64UrlUnpadded::encode_string(&signature.to_bytes()),
+                });
+            }
+        }
+        let advertisement = if signatures.len() == 1 {
+            let signature = signatures.pop().ok_or(Error::MissingKeys {
+                signing: true,
+                recovery: false,
+            })?;
+            Advertise {
                 payload,
-                protected: Some(protected),
-                signature: Some(base64ct::Base64UrlUnpadded::encode_string(
-                    &signatures[0].to_bytes(),
-                )),
+                protected: Some(signature.protected),
+                signature: Some(signature.signature),
                 signatures: None,
-            })
-            .map_err(|_| invalid_data("Unable to encode advertisement"))
+            }
         } else {
-            serde_json::to_string(&Advertise {
+            Advertise {
                 payload,
                 protected: None,
                 signature: None,
-                signatures: Some(
-                    signatures
-                        .iter()
-                        .map(|s| Signature {
-                            protected: protected.to_owned(),
-                            signature: base64ct::Base64UrlUnpadded::encode_string(&s.to_bytes()),
-                        })
-                        .collect(),
-                ),
-            })
-            .map_err(|_| invalid_data("Unable to encode advertisement"))
-        }
+                signatures: Some(signatures),
+            }
+        };
+        serialize_string(&advertisement, "advertisement")
     }
 
-    pub fn rec(&self, kid: &str, request: &str) -> Result<String, std::io::Error> {
-        let key = self.keys.get(kid).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "Requested key not found")
-        })?;
-        require_operation(key, "ECMR", "deriveKey")?;
-
+    pub fn rec(&self, kid: &str, request: &str) -> Result<String> {
+        let key = self
+            .keys
+            .get(kid)
+            .ok_or_else(|| Error::KeyNotFound { kid: kid.into() })?;
+        let secret = match &key.material {
+            KeyMaterial::Recovery(secret) => secret,
+            KeyMaterial::Signing(_) => {
+                return Err(Error::ForbiddenOperation {
+                    kid: kid.into(),
+                    algorithm: "ECMR",
+                    operation: "deriveKey",
+                })
+            }
+        };
         let request_key: MyJwkEcKey = serde_json::from_str(request)
-            .map_err(|_| invalid_data("Invalid recovery request JSON"))?;
-        // Tang permits omitted request metadata, but rejects explicit conflicts.
+            .map_err(|source| Error::request_cause("invalid JSON", JsonError(source)))?;
         if request_key.alg.as_deref().is_some_and(|alg| alg != "ECMR") {
-            return Err(invalid_data("Recovery request must use ECMR"));
+            return Err(Error::request("algorithm must be ECMR"));
         }
         if request_key
             .key_ops
             .as_ref()
             .is_some_and(|ops| !ops.iter().any(|op| op == "deriveKey"))
         {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Recovery request does not permit derivation",
-            ));
+            return Err(Error::request("key operations must permit deriveKey"));
         }
         let request_key = request_key
-            .try_to_jwk_ec_key(true)?
-            .to_public_key::<p521::NistP521>()
-            .map_err(|_| invalid_data("Invalid recovery request point"))?;
-        let secret = key
-            .try_to_jwk_ec_key(false)?
-            .to_secret_key::<p521::NistP521>()
-            .map_err(|_| invalid_data("Invalid recovery key"))?;
-
-        let p = diffie_hellman_public_key(&secret.to_nonzero_scalar(), request_key.as_affine())?;
-
-        serde_json::to_string(&p).map_err(|_| invalid_data("Unable to encode recovery response"))
+            .to_jwk_ec_key(true)
+            .and_then(|jwk| {
+                jwk.to_public_key::<p521::NistP521>()
+                    .map_err(|source| Error::key_cause("invalid public point", source))
+            })
+            .map_err(|source| Error::request_cause("invalid public key", source))?;
+        let response =
+            diffie_hellman_public_key(&secret.to_nonzero_scalar(), request_key.as_affine())?;
+        serialize_string(&response, "recovery response")
     }
 }
 
-pub fn create_new_key_set() -> Vec<String> {
-    let es512_jwk = create_new_jwk("ES512", &["sign", "verify"]);
-    let ecmr_jwk = create_new_jwk("ECMR", &["deriveKey"]);
-    vec![es512_jwk, ecmr_jwk]
+/// Generate private signing and recovery JWKs without writing files.
+/// OS entropy and serialization failures are returned to the caller.
+pub fn create_new_key_set() -> Result<Vec<String>> {
+    create_new_key_set_with_rng(&mut OsRng)
 }
 
-fn invalid_data(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+fn create_new_key_set_with_rng(entropy: &mut impl CryptoRngCore) -> Result<Vec<String>> {
+    let mut rng = crypto_rng(entropy, "key generation")?;
+    Ok(vec![
+        create_new_jwk("ES512", &["sign", "verify"], &mut rng)?,
+        create_new_jwk("ECMR", &["deriveKey"], &mut rng)?,
+    ])
 }
 
-fn require_operation(key: &MyJwkEcKey, algorithm: &str, operation: &str) -> io::Result<()> {
+// P-521 0.13 uses infallible fill_bytes internally, even in try_sign. Seed a
+// CSPRNG through a fallible call before entering those APIs. ChaCha20's fills
+// cannot fail and every operation receives a fresh OS seed.
+fn crypto_rng(entropy: &mut impl CryptoRngCore, operation: &'static str) -> Result<ChaCha20Rng> {
+    ChaCha20Rng::from_rng(entropy).map_err(|source| Error::Randomness { operation, source })
+}
+
+fn serialize<T: Serialize>(value: &T, context: &'static str) -> Result<Vec<u8>> {
+    serde_json::to_vec(value).map_err(|source| Error::Serialization { context, source })
+}
+
+fn serialize_string<T: Serialize>(value: &T, context: &'static str) -> Result<String> {
+    serde_json::to_string(value).map_err(|source| Error::Serialization { context, source })
+}
+
+fn require_operation(
+    key: &MyJwkEcKey,
+    kid: &str,
+    algorithm: &'static str,
+    operation: &'static str,
+) -> Result<()> {
     if key.alg.as_deref() != Some(algorithm)
         || !key
             .key_ops
             .as_ref()
             .is_some_and(|ops| ops.iter().any(|op| op == operation))
     {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Key does not permit the requested operation",
-        ));
+        return Err(Error::ForbiddenOperation {
+            kid: kid.into(),
+            algorithm,
+            operation,
+        });
     }
     Ok(())
 }
@@ -303,7 +318,7 @@ fn create_key_file(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(target_os = "linux")]
-fn set_file_permissions(file: &File) -> Result<(), std::io::Error> {
+fn set_file_permissions(file: &File) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = file.metadata()?.permissions();
     perms.set_mode(0o440); // Read access for owner and group.
@@ -311,112 +326,118 @@ fn set_file_permissions(file: &File) -> Result<(), std::io::Error> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn set_file_permissions(_file: &File) -> Result<(), std::io::Error> {
+fn set_file_permissions(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn load_keys_from_dir(db_path: &Path) -> Result<HashMap<String, MyJwkEcKey>, std::io::Error> {
-    if !db_path.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "Key database \"{}\" does not exist",
-                db_path.to_string_lossy()
-            ),
-        ));
-    }
-
-    if !db_path.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!(
-                "Key database \"{}\" is not a directory",
-                db_path.to_string_lossy()
-            ),
-        ));
-    }
-
-    let mut keys = Vec::new();
-    for entry in db_path.read_dir()? {
-        let path = entry?.path();
-        if path.extension() == Some(std::ffi::OsStr::new("jwk")) {
-            keys.push(std::fs::read_to_string(&path)?);
-        }
-    }
-
-    load_keys_from_vec(&keys)
-}
-
-fn load_keys_from_vec<T: AsRef<str>>(
-    keys: &[T],
-) -> Result<HashMap<String, MyJwkEcKey>, std::io::Error> {
+fn load_keys_from_dir(db_path: &Path) -> Result<HashMap<String, StoredKey>> {
     let mut loaded = HashMap::new();
-    for key in keys {
-        let jwk: MyJwkEcKey = serde_json::from_str(key.as_ref())
-            .map_err(|_| invalid_data("Invalid stored key JSON"))?;
-        match jwk.alg.as_deref() {
-            Some("ES512") => {
-                require_operation(&jwk, "ES512", "sign")?;
-                require_operation(&jwk, "ES512", "verify")?;
-            }
-            Some("ECMR") => require_operation(&jwk, "ECMR", "deriveKey")?,
-            _ => return Err(invalid_data("Unsupported stored key algorithm")),
+    let entries = db_path.read_dir().map_err(|source| Error::KeyDirectory {
+        path: db_path.into(),
+        source,
+    })?;
+    for entry in entries {
+        let path = entry
+            .map_err(|source| Error::KeyDirectory {
+                path: db_path.into(),
+                source,
+            })?
+            .path();
+        if path.extension() == Some(std::ffi::OsStr::new("jwk")) {
+            let json = std::fs::read_to_string(&path).map_err(|source| Error::KeyRead {
+                path: path.clone(),
+                source,
+            })?;
+            load_stored_key(&mut loaded, &json, KeyLocation::File(path))?;
         }
-        jwk.try_to_jwk_ec_key(false)?
-            .to_secret_key::<p521::NistP521>()
-            .map_err(|_| invalid_data("Invalid stored private key"))?;
-        loaded.insert(jwk.thumbprint(), jwk);
     }
     Ok(loaded)
 }
 
-// For future directory monitoring
-//fn scan_folder(dir: &Path) -> String {
-//    let mut sha256 = sha2::Sha256::new();
-//    dir.read_dir()
-//        .unwrap()
-//        .filter_map(|f| f.ok())
-//        .map(|e| e.path())
-//        .filter(|f| f.extension() == Some(std::ffi::OsStr::new("jwk")))
-//        .for_each(|filename| {
-//            let mut file = std::fs::File::open(&filename).unwrap();
-//            let filesize = filesize::file_real_size(&filename).unwrap_or(1024 * 10);
-//            if filesize < 1024 * 10 {
-//                let mut content = String::new();
-//                file.read_to_string(&mut content).unwrap();
-//                sha256.update(content.as_bytes());
-//            }
-//        });
-//
-//    base64ct::Base64UrlUnpadded::encode_string(&sha256.finalize())
-//}
+fn load_keys_from_vec<T: AsRef<str>>(keys: &[T]) -> Result<HashMap<String, StoredKey>> {
+    let mut loaded = HashMap::new();
+    for (index, json) in keys.iter().enumerate() {
+        load_stored_key(&mut loaded, json.as_ref(), KeyLocation::Input(index))?;
+    }
+    Ok(loaded)
+}
 
-fn create_new_jwk(alg: &str, key_ops: &[&str]) -> String {
-    let priv_key = elliptic_curve::SecretKey::<p521::NistP521>::random(&mut OsRng);
-    let jwk = priv_key.to_jwk();
-    let encoded_point = jwk.to_encoded_point::<p521::NistP521>().unwrap();
-    let mut buf = [0; 1000];
+fn load_stored_key(
+    loaded: &mut HashMap<String, StoredKey>,
+    json: &str,
+    location: KeyLocation,
+) -> Result<()> {
+    let load = || -> Result<(String, StoredKey)> {
+        let jwk = parse_stored_key(json)?;
+        let kid = jwk.thumbprint()?;
+        let key = validate_stored_key(jwk, &kid)?;
+        Ok((kid, key))
+    };
+    let (kid, key) = load().map_err(|source| Error::InvalidStoredKey {
+        location,
+        source: Box::new(source),
+    })?;
+    loaded.insert(kid, key);
+    Ok(())
+}
 
-    let x = base64ct::Base64Url::encode(encoded_point.x().unwrap(), &mut buf)
-        .unwrap()
-        .to_string();
+fn parse_stored_key(json: &str) -> Result<MyJwkEcKey> {
+    serde_json::from_str(json).map_err(|source| Error::key_cause("invalid JSON", JsonError(source)))
+}
 
-    let y = base64ct::Base64Url::encode(encoded_point.y().unwrap(), &mut buf)
-        .unwrap()
-        .to_string();
+fn validate_stored_key(jwk: MyJwkEcKey, kid: &str) -> Result<StoredKey> {
+    match jwk.alg.as_deref() {
+        Some("ES512") => {
+            require_operation(&jwk, kid, "ES512", "sign")?;
+            require_operation(&jwk, kid, "ES512", "verify")?;
+        }
+        Some("ECMR") => require_operation(&jwk, kid, "ECMR", "deriveKey")?,
+        _ => return Err(Error::invalid_key("algorithm must be ES512 or ECMR")),
+    }
+    let secret = jwk
+        .to_jwk_ec_key(false)?
+        .to_secret_key::<p521::NistP521>()
+        .map_err(|source| Error::key_cause("invalid private key", source))?;
+    let material = if jwk.alg.as_deref() == Some("ES512") {
+        KeyMaterial::Signing(
+            SigningKey::from_bytes(&secret.to_bytes())
+                .map_err(|source| Error::key_cause("invalid signing key", source))?,
+        )
+    } else {
+        KeyMaterial::Recovery(secret)
+    };
+    let mut public = jwk.to_public_key();
+    if let Some(ops) = &mut public.key_ops {
+        ops.retain(|op| op != "sign");
+    }
+    Ok(StoredKey { public, material })
+}
 
-    serde_json::to_string(&MyJwkEcKey {
-        alg: Some(alg.into()),
+fn create_new_jwk(alg: &str, key_ops: &[&str], rng: &mut ChaCha20Rng) -> Result<String> {
+    let secret = p521::SecretKey::random(rng);
+    let mut jwk = format_public_key(&secret.public_key())?;
+    jwk.d = Some(Base64UrlUnpadded::encode_string(&secret.to_bytes()));
+    jwk.alg = Some(alg.into());
+    jwk.key_ops = Some(key_ops.iter().map(|op| (*op).into()).collect());
+    serialize_string(&jwk, "generated private key")
+}
+
+fn format_public_key(public: &p521::PublicKey) -> Result<MyJwkEcKey> {
+    let point = public.to_encoded_point(false);
+    let x = point
+        .x()
+        .ok_or_else(|| Error::invalid_key("public point has no x coordinate"))?;
+    let y = point
+        .y()
+        .ok_or_else(|| Error::invalid_key("public point has no y coordinate"))?;
+    Ok(MyJwkEcKey {
+        alg: None,
         kty: "EC".into(),
-        crv: jwk.crv().into(),
-        x: x.to_owned(),
-        y: y.to_owned(),
-        d: Some(
-            base64ct::Base64Url::encode(priv_key.to_bytes().as_slice(), &mut buf)
-                .unwrap()
-                .to_string(),
-        ),
-        key_ops: Some(key_ops.iter().map(|k| k.to_string()).collect()),
+        crv: "P-521".into(),
+        x: Base64UrlUnpadded::encode_string(x),
+        y: Base64UrlUnpadded::encode_string(y),
+        d: None,
+        key_ops: None,
         use_: None,
         kid: None,
         x5u: None,
@@ -424,28 +445,20 @@ fn create_new_jwk(alg: &str, key_ops: &[&str]) -> String {
         x5t: None,
         x5t_s256: None,
     })
-    .unwrap()
 }
 
 fn diffie_hellman_public_key(
     secret_key: &elliptic_curve::NonZeroScalar<p521::NistP521>,
     public_key: &elliptic_curve::AffinePoint<p521::NistP521>,
-) -> io::Result<MyJwkEcKey> {
-    let public_point = elliptic_curve::ProjectivePoint::<p521::NistP521>::from(*public_key);
+) -> Result<MyJwkEcKey> {
+    let public_point = p521::ProjectivePoint::from(*public_key);
     let secret_point = (public_point * secret_key.as_ref()).to_affine();
-    let generated_public_key = p521::PublicKey::from_affine(secret_point)
-        .map_err(|_| invalid_data("Invalid recovery result point"))?;
-
-    let mut formatted_public_key: MyJwkEcKey =
-        serde_json::from_str(generated_public_key.to_jwk_string().as_str())
-            .map_err(|_| invalid_data("Unable to encode recovery result point"))?;
-
-    formatted_public_key.alg = Some("ECMR".into());
-    formatted_public_key.crv = "P-521".into();
-    formatted_public_key.kty = "EC".into();
-    formatted_public_key.key_ops = Some(vec!["deriveKey".into()]);
-
-    Ok(formatted_public_key)
+    let public = p521::PublicKey::from_affine(secret_point)
+        .map_err(|source| Error::key_cause("invalid recovery result point", source))?;
+    let mut jwk = format_public_key(&public)?;
+    jwk.alg = Some("ECMR".into());
+    jwk.key_ops = Some(vec!["deriveKey".into()]);
+    Ok(jwk)
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -544,27 +557,46 @@ pub struct MyJwkEcKey {
 }
 
 impl MyJwkEcKey {
-    pub fn to_jwk_ec_key(&self, public: bool) -> JwkEcKey {
-        self.try_to_jwk_ec_key(public).unwrap()
-    }
-
-    fn try_to_jwk_ec_key(&self, public: bool) -> io::Result<JwkEcKey> {
+    /// Convert and validate a P-521 JWK. Private conversion requires a scalar
+    /// whose public point matches the supplied coordinates.
+    pub fn to_jwk_ec_key(&self, public: bool) -> Result<JwkEcKey> {
         if self.kty != "EC" {
-            return Err(invalid_data("Only EC keys are supported"));
+            return Err(Error::invalid_key("key type must be EC"));
         }
-        let mut content: HashMap<String, String> = HashMap::new();
-        content.insert("crv".into(), self.crv.to_owned());
-        content.insert("kty".into(), self.kty.to_owned());
-        content.insert("x".into(), self.x.to_owned());
-        content.insert("y".into(), self.y.to_owned());
-        if !public {
-            if let Some(d) = &self.d {
-                content.insert("d".into(), d.to_owned());
-            }
+        if self.crv != "P-521" {
+            return Err(Error::invalid_key("curve must be P-521"));
         }
-        let json =
-            serde_json::to_string(&content).map_err(|_| invalid_data("Unable to encode EC key"))?;
-        JwkEcKey::from_str(&json).map_err(|_| invalid_data("Invalid EC key"))
+        if !public && self.d.is_none() {
+            return Err(Error::invalid_key("private scalar is missing"));
+        }
+        #[derive(Serialize)]
+        struct Fields<'a> {
+            crv: &'a str,
+            kty: &'a str,
+            x: &'a str,
+            y: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            d: Option<&'a str>,
+        }
+        let fields = Fields {
+            crv: &self.crv,
+            kty: &self.kty,
+            x: &self.x,
+            y: &self.y,
+            d: if public { None } else { self.d.as_deref() },
+        };
+        let json = serialize_string(&fields, "EC key")?;
+        let jwk = JwkEcKey::from_str(&json)
+            .map_err(|source| Error::key_cause("invalid EC key", source))?;
+        if public {
+            jwk.to_public_key::<p521::NistP521>()
+                .map_err(|source| Error::key_cause("invalid public point", source))?;
+        } else {
+            jwk.to_secret_key::<p521::NistP521>().map_err(|source| {
+                Error::key_cause("invalid private scalar or mismatched public point", source)
+            })?;
+        }
+        Ok(jwk)
     }
 
     pub fn to_public_key(&self) -> MyJwkEcKey {
@@ -573,33 +605,119 @@ impl MyJwkEcKey {
         ret
     }
 
-    pub fn thumbprint(&self) -> String {
-        // For EC type the following fields are required to be
-        // present and in lexicographic order
+    /// Compute an RFC 7638 thumbprint from the public fields.
+    pub fn thumbprint(&self) -> Result<String> {
         #[derive(Serialize)]
-        struct Required {
-            crv: String,
-            kty: String,
-            x: String,
-            y: String,
+        struct Required<'a> {
+            crv: &'a str,
+            kty: &'a str,
+            x: &'a str,
+            y: &'a str,
         }
-
-        let required_fields = Required {
-            crv: self.crv.to_owned(),
-            kty: self.kty.to_owned(),
-            x: self.x.to_owned(),
-            y: self.y.to_owned(),
+        let fields = Required {
+            crv: &self.crv,
+            kty: &self.kty,
+            x: &self.x,
+            y: &self.y,
         };
-
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(serde_json::to_string(&required_fields).unwrap().as_bytes());
-        base64ct::Base64UrlUnpadded::encode_string(&hasher.finalize())
+        Ok(Base64UrlUnpadded::encode_string(&sha2::Sha256::digest(
+            serialize(&fields, "key thumbprint")?,
+        )))
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use elliptic_curve::rand_core::{CryptoRng, RngCore};
+    use std::error::Error as _;
+
+    struct FailingEntropy;
+
+    impl CryptoRng for FailingEntropy {}
+
+    impl RngCore for FailingEntropy {
+        fn next_u32(&mut self) -> u32 {
+            panic!("infallible entropy API called")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            panic!("infallible entropy API called")
+        }
+
+        fn fill_bytes(&mut self, _dest: &mut [u8]) {
+            panic!("infallible entropy API called")
+        }
+
+        fn try_fill_bytes(
+            &mut self,
+            _dest: &mut [u8],
+        ) -> std::result::Result<(), elliptic_curve::rand_core::Error> {
+            Err(elliptic_curve::rand_core::Error::new(io::Error::other(
+                "injected entropy failure",
+            )))
+        }
+    }
+
+    #[test]
+    fn entropy_failures_return_errors_before_key_generation_or_signing() {
+        let error = create_new_key_set_with_rng(&mut FailingEntropy).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Randomness {
+                operation: "key generation",
+                ..
+            }
+        ));
+        assert!(error.source().is_some());
+
+        let keys = vec![
+            include_str!("../tests/fixtures/es512.json"),
+            include_str!("../tests/fixtures/ecmr.json"),
+        ];
+        let library = TangyLib::init(KeySource::Vector(&keys)).unwrap();
+        for selection in [None, Some(keys[0])]
+            .map(|key| key.map(|key| parse_stored_key(key).unwrap().thumbprint().unwrap()))
+        {
+            let error = library
+                .adv_with_rng(selection.as_deref(), &mut FailingEntropy)
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Randomness {
+                    operation: "advertisement signing",
+                    ..
+                }
+            ));
+            assert!(error.source().is_some());
+        }
+        // Serving the cached advertisement requires no new entropy.
+        assert!(!library.adv(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn serialization_failures_keep_their_context_and_cause() {
+        struct Unserializable;
+        impl Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                _serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("injected serialization failure"))
+            }
+        }
+        for error in [
+            serialize(&Unserializable, "test payload").unwrap_err(),
+            serialize_string(&Unserializable, "test response").unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Serialization { .. }));
+            assert_eq!(
+                error.source().unwrap().to_string(),
+                "injected serialization failure"
+            );
+        }
+    }
 
     struct FailingWriter {
         file: File,
@@ -649,7 +767,18 @@ mod tests {
                 let error = result.unwrap_err();
                 assert_eq!(opened, fail_on);
                 assert_eq!(
-                    error.kind(),
+                    match &error {
+                        Error::KeyWrite {
+                            path,
+                            operation,
+                            source,
+                        } => {
+                            assert_eq!(path.parent(), Some(dir.path()));
+                            assert_eq!(*operation, if fail_create { "create" } else { "write" });
+                            source.kind()
+                        }
+                        _ => panic!("unexpected error: {error:?}"),
+                    },
                     if fail_create {
                         io::ErrorKind::PermissionDenied
                     } else {

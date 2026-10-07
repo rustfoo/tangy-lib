@@ -33,10 +33,16 @@ tangy-lib = "0.1"
 Initialize `TangyLib` with a directory of key files or a vector of JSON Web Key (JWK) strings. JWK is the JSON format used to store and exchange keys:
 
 ``` rust
-use tangy_lib::{KeySource, TangyLib};
-let mut tangy = TangyLib::init(KeySource::LocalDir(&dir_path)).unwrap();
-// or
-let mut tangy = TangyLib::init(KeySource::Vector(&vec_of_keys)).unwrap();
+use std::path::Path;
+use tangy_lib::{KeySource, Result, TangyLib};
+
+fn open_directory(dir: &Path) -> Result<TangyLib> {
+    TangyLib::init(KeySource::LocalDir(dir))
+}
+
+fn open_keys(keys: &Vec<&str>) -> Result<TangyLib> {
+    TangyLib::init(KeySource::Vector(keys))
+}
 ```
 
 `LocalDir` loads files with the `.jwk` extension from an existing directory. If there are no `.jwk` entries, it generates and saves a new key set. `Vector` loads the supplied keys without writing files; an empty vector returns an error.
@@ -46,31 +52,40 @@ A key set must contain at least one signing key and one recovery key. Both use t
 - Signing keys use `alg: "ES512"` and must include both `sign` and `verify` in `key_ops`. They sign the server's advertisement so clients can verify it.
 - Recovery keys use `alg: "ECMR"` (Elliptic Curve Message Recovery) and must include `deriveKey` in `key_ops`. They let the server participate in a client's secret recovery.
 
-Initialization returns `std::io::Error` for malformed, unreadable, or incomplete key sets, unsupported algorithms, missing key operations, and file creation or write failures. Existing invalid keys are not automatically replaced. Generated key files are written individually: if a write fails, files already created remain in the directory and may need repair before initialization can succeed.
+Initialization returns `tangy_lib::Error` for malformed, unreadable, or incomplete key sets, unsupported algorithms, missing key operations, and file creation or write failures. Validated signing and recovery keys are retained as typed crypto keys for subsequent operations. Existing invalid keys are not automatically replaced. Generated key files are written individually: if a write fails, files already created remain in the directory and may need repair before initialization can succeed.
 
 The library provides two protocol responses: an advertisement containing the server's public keys and signatures, and a recovery response computed from a client's public key and the server's recovery key. Both methods return JSON strings:
 
 ``` rust
-use tangy_lib::{KeySource, TangyLib};
-let tangy = TangyLib::init(KeySource::LocalDir(&dir_path)).unwrap();
-let adv = tangy.adv(None).unwrap();
-// kid identifies the server's recovery key; data is the client's JWK JSON.
-let rec = tangy.rec(&kid, &data).unwrap();
+use tangy_lib::{Result, TangyLib};
+
+fn responses(tangy: &TangyLib, kid: &str, data: &str) -> Result<(String, String)> {
+    let adv = tangy.adv(None)?;
+    // kid identifies the server's recovery key; data is the client's JWK JSON.
+    let rec = tangy.rec(kid, data)?;
+    Ok((adv, rec))
+}
 ```
 
-Keys are identified by a thumbprint, a hash of their public JWK fields. `adv(None)` signs the advertisement with all signing keys. `adv(Some(thumbprint))` requires that the identified key exists and permits signing, and includes its signature along with those of the other signing keys. This allows Clevis clients to verify every signing key in the advertisement. An unknown thumbprint returns `std::io::ErrorKind::NotFound`; a key that does not permit signing also returns an error.
+Keys are identified by a thumbprint, a hash of their public JWK fields. `adv(None)` signs the advertisement with all signing keys. `adv(Some(thumbprint))` requires that the identified key exists and permits signing, and includes its signature along with those of the other signing keys. This allows Clevis clients to verify every signing key in the advertisement. An unknown thumbprint returns `Error::KeyNotFound` with the requested ID; a key that does not permit signing returns `Error::ForbiddenOperation`.
 
-For `rec(&kid, &data)`, `kid` is the thumbprint of a server recovery key and `data` is the client's public key encoded as a JWK string. The client key must describe a valid point on P-521. Its `alg` and `key_ops` fields are optional; if present, `alg` must be `"ECMR"` and `key_ops` must include `"deriveKey"`. Unknown keys, unsuitable server keys, and invalid client keys return `std::io::Error`.
+For `rec(&kid, &data)`, `kid` is the thumbprint of a server recovery key and `data` is the client's public key encoded as a JWK string. The client key must describe a valid point on P-521. Its `alg` and `key_ops` fields are optional; if present, `alg` must be `"ECMR"` and `key_ops` must include `"deriveKey"`. Unknown keys return `Error::KeyNotFound`, unsuitable server keys return `Error::ForbiddenOperation`, and invalid client keys return `Error::InvalidRequest`.
 
 Advertisements use JSON Web Signature (JWS) format with unpadded Base64URL fields. Neither advertisements nor recovery responses include private key material.
 
 To generate keys for your own storage or for use with `KeySource::Vector`:
 
 ``` rust
-let keys : Vec<String> = tangy_lib::create_new_key_set();
+fn generate() -> tangy_lib::Result<Vec<String>> {
+    tangy_lib::create_new_key_set()
+}
 ```
 
-This returns two private JWK strings: one ES512 signing key and one ECMR recovery key. It does not write files.
+On success this returns two private JWK strings: one ES512 signing key and one ECMR recovery key. It does not write files. Generation and advertisement signing obtain an OS seed through a fallible call, then use a ChaCha20 cryptographic generator with P-521. An entropy failure returns `Error::Randomness`; a signing failure returns `Error::Signing` with the signing key ID.
+
+All fallible public operations use the crate's `Result<T>` alias. `MyJwkEcKey::to_jwk_ec_key(public)` now returns `Result<JwkEcKey>` and validates P-521 key material, including matching public and private values for private conversion. `MyJwkEcKey::thumbprint()` returns `Result<String>`. Use `?` on these helpers and on `create_new_key_set()` when migrating from 0.1 or 0.2.0-alpha.1.
+
+The public `Error` enum is non-exhaustive, so callers should include a fallback arm when matching it. `InvalidStoredKey` identifies the file path or zero-based vector index and wraps the validation cause; `MissingKeys` identifies absent signing and recovery roles. `KeyDirectory`, `KeyRead`, and `KeyWrite` carry paths and preserve the underlying I/O error. `Serialization` preserves its cause and names the operation. Inspect `std::error::Error::source()` for diagnostics. JSON decoding causes use `JsonError`, which reports category, line, and column and deliberately stops the source chain before Serde's raw message, because type errors can quote private input values.
 
 ## Testing
 
@@ -78,7 +93,8 @@ Run these commands from the repository root to execute the Rust tests, check all
 
 ```sh
 cargo test --locked
-cargo check --locked --all-targets
+cargo check --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 

@@ -6,6 +6,34 @@ This changelog follows the Keep a Changelog format.
 
 ## [Unreleased]
 
+### Added
+
+- Public non-exhaustive `Error`, `Result<T>`, `KeyLocation`, and `JsonError`
+  types. Errors distinguish invalid requests, invalid server keys, missing key
+  roles, forbidden operations, persistence, serialization, signing, and entropy
+  failures, retaining source chains and key IDs, paths, or vector indices.
+- Regression coverage for typed error contracts, diagnostic redaction, and
+  injected entropy and serialization failures. Production unwrap/expect calls
+  are forbidden by scoped Clippy lints, checked in Linux CI.
+
+### Changed
+
+- **Breaking:** `init`, `adv`, `adv_internal`, and `rec` return the crate's
+  typed `Result`. `create_new_key_set`, `MyJwkEcKey::to_jwk_ec_key`, and
+  `MyJwkEcKey::thumbprint` now return typed results; callers must use `?` or
+  otherwise handle failures. Conversion validates P-521 public/private material.
+- Initialization retains validated typed signing and recovery keys alongside
+  public metadata, avoiding JSON private-key conversion during protocol calls.
+- OS randomness is obtained fallibly to seed ChaCha20 before P-521 key generation
+  or randomized signing. Randomness and signing failures return errors.
+- JSON decoding diagnostics retain category and position without echoing input
+  values; raw Serde messages are deliberately hidden to protect private keys.
+
+### Fixed
+
+- Removed production unwrap/expect calls, fixed-size Base64 encoding buffers,
+  and indirect use of infallible OS entropy and JWK string serialization APIs.
+
 ## [0.2.0-alpha.1] - 2026-10-07
 
 ### Added

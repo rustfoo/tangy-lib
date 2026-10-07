@@ -29,9 +29,10 @@ fn generated_keys_are_persisted_and_stable_across_restart() {
     let mut recovery_id = None;
     for (file, bytes) in &before {
         let key = fixture_key(std::str::from_utf8(bytes).unwrap());
-        let id = key.thumbprint();
+        let id = key.thumbprint().unwrap();
         assert_eq!(file, &format!("{id}.jwk"));
         key.to_jwk_ec_key(false)
+            .unwrap()
             .to_secret_key::<p521::NistP521>()
             .unwrap();
         if key.alg.as_deref() == Some("ECMR") {

@@ -6,7 +6,7 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use common::*;
 use p521::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use serde_json::{json, Value};
-use tangy_lib::MyJwkEcKey;
+use tangy_lib::{Error, MyJwkEcKey};
 
 // Verify the exact wire signing input, without reserializing either JWS field.
 fn verified_signers(adv: &Value) -> Vec<Option<String>> {
@@ -39,6 +39,7 @@ fn verified_signers(adv: &Value) -> Vec<Option<String>> {
                 .filter(|key| {
                     let point = key
                         .to_jwk_ec_key(true)
+                        .unwrap()
                         .to_encoded_point::<p521::NistP521>()
                         .unwrap();
                     VerifyingKey::from_sec1_bytes(point.as_bytes())
@@ -46,7 +47,7 @@ fn verified_signers(adv: &Value) -> Vec<Option<String>> {
                         .verify(input.as_bytes(), &signature)
                         .is_ok()
                 })
-                .map(MyJwkEcKey::thumbprint)
+                .map(|key| key.thumbprint().unwrap())
                 .collect();
             assert!(matches.len() <= 1);
             matches.into_iter().next()
@@ -148,6 +149,7 @@ fn recovery_matches_independent_vectors() {
         assert_public(&response);
         fixture_key(&wire)
             .to_jwk_ec_key(true)
+            .unwrap()
             .to_public_key::<p521::NistP521>()
             .unwrap();
     }
@@ -158,6 +160,7 @@ fn blinded_client_recovers_its_original_shared_point() {
     let lib = library(&[SIGNING, RECOVERY]);
     let server = fixture_key(RECOVERY)
         .to_jwk_ec_key(true)
+        .unwrap()
         .to_public_key::<p521::NistP521>()
         .unwrap();
     // Use fixed valid scalars without depending on the server's private key.
@@ -171,6 +174,7 @@ fn blinded_client_recovers_its_original_shared_point() {
     let response = lib.rec(&thumbprint(RECOVERY), &request).unwrap();
     let response = fixture_key(&response)
         .to_jwk_ec_key(true)
+        .unwrap()
         .to_public_key::<p521::NistP521>()
         .unwrap();
     let server_point = p521::ProjectivePoint::from(*server.as_affine());
@@ -201,13 +205,11 @@ fn recovery_accepts_public_requests_without_optional_metadata() {
 fn unknown_ids_and_wrong_server_key_role_return_errors() {
     let lib = library(&[SIGNING, RECOVERY]);
     let request = vectors()[1]["request"].to_string();
-    assert_eq!(
-        lib.adv(Some("unknown")).unwrap_err().kind(),
-        std::io::ErrorKind::NotFound
+    assert!(
+        matches!(lib.adv(Some("unknown")), Err(Error::KeyNotFound { kid }) if kid == "unknown")
     );
-    assert_eq!(
-        lib.rec("unknown", &request).unwrap_err().kind(),
-        std::io::ErrorKind::NotFound
+    assert!(
+        matches!(lib.rec("unknown", &request), Err(Error::KeyNotFound { kid }) if kid == "unknown")
     );
     assert!(lib.adv(Some(&thumbprint(RECOVERY))).is_err());
     assert!(lib.rec(&thumbprint(SIGNING), &request).is_err());

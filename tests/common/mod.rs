@@ -17,7 +17,7 @@ pub fn fixture_key(json: &str) -> MyJwkEcKey {
 }
 
 pub fn thumbprint(json: &str) -> String {
-    fixture_key(json).thumbprint()
+    fixture_key(json).thumbprint().unwrap()
 }
 
 pub fn vectors() -> Vec<Value> {

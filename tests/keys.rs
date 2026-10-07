@@ -14,19 +14,19 @@ fn thumbprints_match_independently_computed_values_and_ignore_metadata() {
         ("es512-second.json", SECOND_SIGNING),
     ] {
         let mut key = fixture_key(source);
-        assert_eq!(key.thumbprint(), expected[name]);
-        assert_eq!(key.to_public_key().thumbprint(), expected[name]);
+        assert_eq!(key.thumbprint().unwrap(), expected[name]);
+        assert_eq!(key.to_public_key().thumbprint().unwrap(), expected[name]);
         key.alg = None;
         key.key_ops = None;
         key.kid = Some("arbitrary metadata".into());
         key.use_ = Some("sig".into());
-        assert_eq!(key.thumbprint(), expected[name]);
+        assert_eq!(key.thumbprint().unwrap(), expected[name]);
     }
 }
 
 #[test]
 fn generated_keys_and_serialization_round_trips_are_usable() {
-    let generated = create_new_key_set();
+    let generated = create_new_key_set().unwrap();
     assert_eq!(generated.len(), 2);
     let lib = library(&generated.iter().map(String::as_str).collect::<Vec<_>>());
     let mut algorithms = Vec::new();
@@ -47,12 +47,14 @@ fn generated_keys_and_serialization_round_trips_are_usable() {
         );
         let secret = round_trip
             .to_jwk_ec_key(false)
+            .unwrap()
             .to_secret_key::<p521::NistP521>()
             .unwrap();
         let public = key.to_public_key();
         assert_eq!(
             public
                 .to_jwk_ec_key(true)
+                .unwrap()
                 .to_public_key::<p521::NistP521>()
                 .unwrap(),
             secret.public_key()
@@ -60,18 +62,21 @@ fn generated_keys_and_serialization_round_trips_are_usable() {
         let public_json = serde_json::to_value(&public).unwrap();
         assert_public(&public_json);
         assert_eq!(
-            fixture_key(&public_json.to_string()).thumbprint(),
-            key.thumbprint()
+            fixture_key(&public_json.to_string()).thumbprint().unwrap(),
+            key.thumbprint().unwrap()
         );
         match key.alg.as_deref().unwrap() {
             "ES512" => {
                 assert_eq!(key.key_ops, Some(vec!["sign".into(), "verify".into()]));
-                lib.adv(Some(&key.thumbprint())).unwrap();
+                lib.adv(Some(&key.thumbprint().unwrap())).unwrap();
             }
             "ECMR" => {
                 assert_eq!(key.key_ops, Some(vec!["deriveKey".into()]));
-                lib.rec(&key.thumbprint(), &vectors()[0]["request"].to_string())
-                    .unwrap();
+                lib.rec(
+                    &key.thumbprint().unwrap(),
+                    &vectors()[0]["request"].to_string(),
+                )
+                .unwrap();
             }
             _ => panic!("unexpected algorithm"),
         }
