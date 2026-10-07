@@ -1,0 +1,32 @@
+[package]
+name = "tangy-lib-fuzz"
+version = "1.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+base64ct = { version = "1.8", features = ["alloc"] }
+serde_json = "1.0"
+tangy-lib = { path = ".." }
+
+# Keep nightly fuzz tooling separate from the library's MSRV dependency graph.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "recovery_request"
+path = "fuzz_targets/recovery_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwk_conversion"
+path = "fuzz_targets/jwk_conversion.rs"
+test = false
+doc = false
+bench = false
