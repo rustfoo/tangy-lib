@@ -6,7 +6,7 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use common::*;
 use p521::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use serde_json::{json, Value};
-use tangy_lib::{Error, MyJwkEcKey};
+use tangy_lib::MyJwkEcKey;
 
 // Verify the exact wire signing input, without reserializing either JWS field.
 fn verified_signers(adv: &Value) -> Vec<Option<String>> {
@@ -55,6 +55,7 @@ fn verified_signers(adv: &Value) -> Vec<Option<String>> {
         .collect()
 }
 
+/// Assures: ADV-SIG-001, KEY-PRIV-001
 #[test]
 fn advertisements_verify_and_publish_only_public_keys() {
     for signing_keys in [vec![SIGNING], vec![SIGNING, SECOND_SIGNING]] {
@@ -107,6 +108,7 @@ fn advertisements_verify_and_publish_only_public_keys() {
     }
 }
 
+/// Assures: ADV-SIG-001
 #[test]
 fn advertisement_payload_is_unpadded_for_all_length_remainders() {
     for metadata in ["a", "ab", "abc"] {
@@ -119,6 +121,7 @@ fn advertisement_payload_is_unpadded_for_all_length_remainders() {
     }
 }
 
+/// Assures: ADV-SIG-001
 #[test]
 fn altered_payload_and_signature_do_not_verify() {
     let lib = library(&[SIGNING, RECOVERY]);
@@ -137,6 +140,7 @@ fn altered_payload_and_signature_do_not_verify() {
     assert_eq!(verified_signers(&changed), [None]);
 }
 
+/// Assures: REC-CORRECT-001, KEY-PRIV-001
 #[test]
 fn recovery_matches_independent_vectors() {
     let lib = library(&[SIGNING, RECOVERY]);
@@ -155,6 +159,7 @@ fn recovery_matches_independent_vectors() {
     }
 }
 
+/// Assures: REC-CORRECT-001
 #[test]
 fn blinded_client_recovers_its_original_shared_point() {
     let lib = library(&[SIGNING, RECOVERY]);
@@ -184,6 +189,7 @@ fn blinded_client_recovers_its_original_shared_point() {
     assert_eq!(unblinded, expected);
 }
 
+/// Assures: REC-CORRECT-001
 #[test]
 fn recovery_accepts_public_requests_without_optional_metadata() {
     let lib = library(&[SIGNING, RECOVERY]);
@@ -201,20 +207,7 @@ fn recovery_accepts_public_requests_without_optional_metadata() {
     );
 }
 
-#[test]
-fn unknown_ids_and_wrong_server_key_role_return_errors() {
-    let lib = library(&[SIGNING, RECOVERY]);
-    let request = vectors()[1]["request"].to_string();
-    assert!(
-        matches!(lib.adv(Some("unknown")), Err(Error::KeyNotFound { kid }) if kid == "unknown")
-    );
-    assert!(
-        matches!(lib.rec("unknown", &request), Err(Error::KeyNotFound { kid }) if kid == "unknown")
-    );
-    assert!(lib.adv(Some(&thumbprint(RECOVERY))).is_err());
-    assert!(lib.rec(&thumbprint(SIGNING), &request).is_err());
-}
-
+/// Assures: REQ-REJECT-001
 #[test]
 fn malformed_recovery_requests_return_errors() {
     let lib = library(&[SIGNING, RECOVERY]);

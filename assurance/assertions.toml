@@ -1,0 +1,62 @@
+# Assertions this library makes about itself.
+#
+# Each assertion is supported by tests tagged in code with a doc comment
+# directly above the test, e.g. `/// Assures: KEY-PERM-001`. CI runs
+# `scripts/check-assurance.py`, which fails unless every assertion has at least
+# `min_evidence` tagged tests that passed. Skipped or missing tests do not count.
+# See assurance/README.md.
+
+[[assertion]]
+id = "ADV-SIG-001"
+statement = "Advertisements are JWS-signed by every advertised ES512 key, signatures verify over the exact wire bytes, and tampering is detected."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-PRIV-001"
+statement = "Advertisements, recovery responses, error messages and debug output never contain private key material."
+min_evidence = 4
+
+[[assertion]]
+id = "REC-CORRECT-001"
+statement = "Recovery responses match independently generated vectors, and a blinded client recovers its original shared point."
+min_evidence = 2
+
+[[assertion]]
+id = "REQ-REJECT-001"
+statement = "Malformed or invalid recovery requests (bad JSON, wrong curve or key type, off-curve points, private-key operations) return a typed error, never a response or a panic."
+min_evidence = 2
+
+[[assertion]]
+id = "KEY-LOAD-001"
+statement = "Invalid, incomplete or unreadable key material fails initialisation; no key is silently skipped."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-STORE-001"
+statement = "Generated keys persist with stable identities across restarts, and existing key files are never overwritten or modified, including by failed initialisation."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-PERM-001"
+statement = "On Linux, key files are created with mode 0440 (read-only for owner and group)."
+min_evidence = 1
+
+[[assertion]]
+id = "KEY-ID-001"
+statement = "Key IDs are RFC 7638 thumbprints that match independently computed values and ignore optional metadata."
+min_evidence = 1
+
+[[assertion]]
+id = "KEY-GEN-001"
+statement = "Key generation produces a usable P-521 ES512 signing key and ECMR recovery key, and fails closed when the entropy source fails."
+min_evidence = 2
+
+[[assertion]]
+id = "ERR-DIAG-001"
+statement = "Errors identify the failing key, path or operation and preserve the underlying cause."
+min_evidence = 4
+
+[[assertion]]
+id = "INTEROP-001"
+statement = "A stock Clevis client can encrypt against the library's advertisements and decrypt through its recovery endpoint, with one or two signing keys."
+min_evidence = 1

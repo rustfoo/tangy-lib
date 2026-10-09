@@ -4,7 +4,7 @@ on: [push, pull_request]
 
 jobs:
   rust-stable:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     
     steps:
     
@@ -12,6 +12,7 @@ jobs:
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: rustfmt, clippy
+    - uses: taiki-e/install-action@nextest
 
     - name: Build & Test
       run: |
@@ -19,10 +20,19 @@ jobs:
         cargo check --locked --all-targets
         cargo clippy --locked --all-targets --all-features -- -D warnings
         cargo build --locked --release
-        cargo test --locked
+        cargo test --locked --doc
+        cargo nextest run --locked --profile ci
+
+    - name: Upload test evidence
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: junit-linux
+        path: target/nextest/ci/junit.xml
+        if-no-files-found: error
 
   rust-stable-windows:
-    runs-on: windows-latest
+    runs-on: blacksmith-2vcpu-windows-2025
     
     steps:
     
@@ -51,11 +61,12 @@ jobs:
         cargo test --locked
 
   clevis-interop:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
+    - uses: taiki-e/install-action@nextest
     - name: Install interoperability tools
       run: |
         sudo apt-get update
@@ -63,4 +74,46 @@ jobs:
     - name: Check independent fixtures and Clevis recovery
       run: |
         python3 scripts/check-fixtures.py
-        cargo test --locked --features interop --test clevis
+        cargo nextest run --locked --profile ci --features interop --test clevis
+    - name: Upload test evidence
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: junit-interop
+        path: target/nextest/ci/junit.xml
+        if-no-files-found: error
+
+  # Every assertion in assurance/assertions.toml must be backed by passing tests.
+  assurance:
+    needs: [rust-stable, clevis-interop]
+    if: ${{ !cancelled() }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: junit-*
+        path: ${{ runner.temp }}/junit
+    - name: Check assertions against test results
+      run: |
+        python3 scripts/check-assurance.py \
+          --junit linux=${{ runner.temp }}/junit/junit-linux/junit.xml \
+          --junit interop=${{ runner.temp }}/junit/junit-interop/junit.xml \
+          --out ${{ runner.temp }}/evidence.json
+    - name: Upload evidence record
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: assurance-evidence
+        path: |
+          ${{ runner.temp }}/evidence.json
+          ${{ runner.temp }}/junit
+    - name: Attest evidence record
+      if: github.event_name == 'push'
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-path: ${{ runner.temp }}/evidence.json

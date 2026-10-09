@@ -5,6 +5,7 @@ use common::*;
 use serde_json::{json, Value};
 use tangy_lib::{create_new_key_set, KeySource, MyJwkEcKey, TangyLib};
 
+/// Assures: KEY-ID-001
 #[test]
 fn thumbprints_match_independently_computed_values_and_ignore_metadata() {
     let expected: Value = serde_json::from_str(include_str!("fixtures/thumbprints.json")).unwrap();
@@ -24,6 +25,7 @@ fn thumbprints_match_independently_computed_values_and_ignore_metadata() {
     }
 }
 
+/// Assures: KEY-GEN-001
 #[test]
 fn generated_keys_and_serialization_round_trips_are_usable() {
     let generated = create_new_key_set().unwrap();
@@ -85,6 +87,7 @@ fn generated_keys_and_serialization_round_trips_are_usable() {
     assert_eq!(algorithms, ["ECMR", "ES512"]);
 }
 
+/// Assures: KEY-LOAD-001
 #[test]
 fn malformed_or_incomplete_vectors_return_errors() {
     for keys in [
@@ -99,6 +102,7 @@ fn malformed_or_incomplete_vectors_return_errors() {
     }
 }
 
+/// Assures: KEY-LOAD-001
 #[test]
 fn invalid_stored_keys_return_errors() {
     for source in [SIGNING, RECOVERY] {

@@ -1,4 +1,11 @@
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::indexing_slicing,
+    clippy::todo
+)]
 //! Tang advertisements and P-521 message recovery with typed errors.
 //!
 //! ```
@@ -16,7 +23,9 @@
 //! ```
 
 mod error;
-pub use error::{Error, JsonError, KeyLocation, Result};
+pub use error::{
+    Algorithm, Error, JsonError, KeyLocation, KeyOperation, RandomPurpose, Result, WriteStep,
+};
 
 use std::{
     collections::HashMap,
@@ -96,13 +105,13 @@ impl TangyLib {
                     let path = dir.join(format!("{kid}.jwk"));
                     let mut file = create(&path).map_err(|source| Error::KeyWrite {
                         path: path.clone(),
-                        operation: "create",
+                        operation: WriteStep::Create,
                         source,
                     })?;
                     file.write_all(json.as_bytes())
                         .map_err(|source| Error::KeyWrite {
                             path,
-                            operation: "write",
+                            operation: WriteStep::Write,
                             source,
                         })?;
                     loaded_keys.insert(kid, key);
@@ -167,8 +176,8 @@ impl TangyLib {
             if !matches!(key.material, KeyMaterial::Signing(_)) {
                 return Err(Error::ForbiddenOperation {
                     kid: kid.into(),
-                    algorithm: "ES512",
-                    operation: "sign",
+                    algorithm: Algorithm::Es512,
+                    operation: KeyOperation::Sign,
                 });
             }
         }
@@ -182,7 +191,7 @@ impl TangyLib {
         let protected =
             Base64UrlUnpadded::encode_string(r#"{"alg":"ES512","cty":"jwk-set+json"}"#.as_bytes());
         let to_sign = format!("{protected}.{payload}");
-        let mut rng = crypto_rng(entropy, "advertisement signing")?;
+        let mut rng = crypto_rng(entropy, RandomPurpose::AdvertisementSigning)?;
         // Like Tang, retain signatures for every advertised verification key.
         let mut signatures = Vec::new();
         for (kid, key) in &self.keys {
@@ -191,7 +200,7 @@ impl TangyLib {
                     .try_sign_with_rng(&mut rng, to_sign.as_bytes())
                     .map_err(|source| Error::Signing {
                         kid: kid.clone(),
-                        source,
+                        source: Box::new(source),
                     })?;
                 signatures.push(Signature {
                     protected: protected.clone(),
@@ -199,24 +208,20 @@ impl TangyLib {
                 });
             }
         }
-        let advertisement = if signatures.len() == 1 {
-            let signature = signatures.pop().ok_or(Error::MissingKeys {
-                signing: true,
-                recovery: false,
-            })?;
-            Advertise {
+        // Initialization guarantees at least one signing key.
+        let advertisement = match signatures.as_slice() {
+            [signature] => Advertise {
                 payload,
-                protected: Some(signature.protected),
-                signature: Some(signature.signature),
+                protected: Some(signature.protected.clone()),
+                signature: Some(signature.signature.clone()),
                 signatures: None,
-            }
-        } else {
-            Advertise {
+            },
+            _ => Advertise {
                 payload,
                 protected: None,
                 signature: None,
                 signatures: Some(signatures),
-            }
+            },
         };
         serialize_string(&advertisement, "advertisement")
     }
@@ -231,8 +236,8 @@ impl TangyLib {
             KeyMaterial::Signing(_) => {
                 return Err(Error::ForbiddenOperation {
                     kid: kid.into(),
-                    algorithm: "ECMR",
-                    operation: "deriveKey",
+                    algorithm: Algorithm::Ecmr,
+                    operation: KeyOperation::DeriveKey,
                 })
             }
         };
@@ -268,7 +273,7 @@ pub fn create_new_key_set() -> Result<Vec<String>> {
 }
 
 fn create_new_key_set_with_rng(entropy: &mut impl CryptoRngCore) -> Result<Vec<String>> {
-    let mut rng = crypto_rng(entropy, "key generation")?;
+    let mut rng = crypto_rng(entropy, RandomPurpose::KeyGeneration)?;
     Ok(vec![
         create_new_jwk("ES512", &["sign", "verify"], &mut rng)?,
         create_new_jwk("ECMR", &["deriveKey"], &mut rng)?,
@@ -278,8 +283,11 @@ fn create_new_key_set_with_rng(entropy: &mut impl CryptoRngCore) -> Result<Vec<S
 // P-521 0.13 uses infallible fill_bytes internally, even in try_sign. Seed a
 // CSPRNG through a fallible call before entering those APIs. ChaCha20's fills
 // cannot fail and every operation receives a fresh OS seed.
-fn crypto_rng(entropy: &mut impl CryptoRngCore, operation: &'static str) -> Result<ChaCha20Rng> {
-    ChaCha20Rng::from_rng(entropy).map_err(|source| Error::Randomness { operation, source })
+fn crypto_rng(entropy: &mut impl CryptoRngCore, operation: RandomPurpose) -> Result<ChaCha20Rng> {
+    ChaCha20Rng::from_rng(entropy).map_err(|source| Error::Randomness {
+        operation,
+        source: Box::new(source),
+    })
 }
 
 fn serialize<T: Serialize>(value: &T, context: &'static str) -> Result<Vec<u8>> {
@@ -293,14 +301,14 @@ fn serialize_string<T: Serialize>(value: &T, context: &'static str) -> Result<St
 fn require_operation(
     key: &MyJwkEcKey,
     kid: &str,
-    algorithm: &'static str,
-    operation: &'static str,
+    algorithm: Algorithm,
+    operation: KeyOperation,
 ) -> Result<()> {
-    if key.alg.as_deref() != Some(algorithm)
+    if key.alg.as_deref() != Some(algorithm.as_str())
         || !key
             .key_ops
             .as_ref()
-            .is_some_and(|ops| ops.iter().any(|op| op == operation))
+            .is_some_and(|ops| ops.iter().any(|op| op == operation.as_str()))
     {
         return Err(Error::ForbiddenOperation {
             kid: kid.into(),
@@ -388,10 +396,10 @@ fn parse_stored_key(json: &str) -> Result<MyJwkEcKey> {
 fn validate_stored_key(jwk: MyJwkEcKey, kid: &str) -> Result<StoredKey> {
     match jwk.alg.as_deref() {
         Some("ES512") => {
-            require_operation(&jwk, kid, "ES512", "sign")?;
-            require_operation(&jwk, kid, "ES512", "verify")?;
+            require_operation(&jwk, kid, Algorithm::Es512, KeyOperation::Sign)?;
+            require_operation(&jwk, kid, Algorithm::Es512, KeyOperation::Verify)?;
         }
-        Some("ECMR") => require_operation(&jwk, kid, "ECMR", "deriveKey")?,
+        Some("ECMR") => require_operation(&jwk, kid, Algorithm::Ecmr, KeyOperation::DeriveKey)?,
         _ => return Err(Error::invalid_key("algorithm must be ES512 or ECMR")),
     }
     let secret = jwk
@@ -399,10 +407,9 @@ fn validate_stored_key(jwk: MyJwkEcKey, kid: &str) -> Result<StoredKey> {
         .to_secret_key::<p521::NistP521>()
         .map_err(|source| Error::key_cause("invalid private key", source))?;
     let material = if jwk.alg.as_deref() == Some("ES512") {
-        KeyMaterial::Signing(
-            SigningKey::from_bytes(&secret.to_bytes())
-                .map_err(|source| Error::key_cause("invalid signing key", source))?,
-        )
+        // P-521 0.13 wraps the generic ECDSA key; construct it without a
+        // serialized scalar copy or fallible reparsing.
+        KeyMaterial::Signing(::ecdsa::SigningKey::<p521::NistP521>::from(&secret).into())
     } else {
         KeyMaterial::Recovery(secret)
     };
@@ -453,8 +460,11 @@ fn diffie_hellman_public_key(
 ) -> Result<MyJwkEcKey> {
     let public_point = p521::ProjectivePoint::from(*public_key);
     let secret_point = (public_point * secret_key.as_ref()).to_affine();
+    // A validated nonidentity point times a nonzero scalar on the prime-order
+    // P-521 curve cannot be the identity. Retain a request-classified error at
+    // this fallible API boundary in case that invariant ever changes.
     let public = p521::PublicKey::from_affine(secret_point)
-        .map_err(|source| Error::key_cause("invalid recovery result point", source))?;
+        .map_err(|source| Error::request_cause("invalid recovery result point", source))?;
     let mut jwk = format_public_key(&public)?;
     jwk.alg = Some("ECMR".into());
     jwk.key_ops = Some(vec!["deriveKey".into()]);
@@ -627,7 +637,14 @@ impl MyJwkEcKey {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::indexing_slicing,
+    clippy::todo
+)]
 mod tests {
     use super::*;
     use elliptic_curve::rand_core::{CryptoRng, RngCore};
@@ -660,17 +677,25 @@ mod tests {
         }
     }
 
+    /// Assures: KEY-GEN-001
     #[test]
     fn entropy_failures_return_errors_before_key_generation_or_signing() {
         let error = create_new_key_set_with_rng(&mut FailingEntropy).unwrap_err();
         assert!(matches!(
             error,
             Error::Randomness {
-                operation: "key generation",
+                operation: RandomPurpose::KeyGeneration,
                 ..
             }
         ));
-        assert!(error.source().is_some());
+        assert!(error
+            .source()
+            .unwrap()
+            .is::<elliptic_curve::rand_core::Error>());
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "injected entropy failure"
+        );
 
         let keys = vec![
             include_str!("../tests/fixtures/es512.json"),
@@ -686,16 +711,24 @@ mod tests {
             assert!(matches!(
                 error,
                 Error::Randomness {
-                    operation: "advertisement signing",
+                    operation: RandomPurpose::AdvertisementSigning,
                     ..
                 }
             ));
-            assert!(error.source().is_some());
+            assert!(error
+                .source()
+                .unwrap()
+                .is::<elliptic_curve::rand_core::Error>());
+            assert_eq!(
+                error.source().unwrap().to_string(),
+                "injected entropy failure"
+            );
         }
         // Serving the cached advertisement requires no new entropy.
         assert!(!library.adv(None).unwrap().is_empty());
     }
 
+    /// Assures: ERR-DIAG-001
     #[test]
     fn serialization_failures_keep_their_context_and_cause() {
         struct Unserializable;
@@ -738,6 +771,7 @@ mod tests {
         }
     }
 
+    /// Assures: KEY-STORE-001, ERR-DIAG-001
     #[test]
     fn initialization_propagates_create_and_partial_write_failures() {
         for fail_on in [1, 2] {
@@ -774,7 +808,14 @@ mod tests {
                             source,
                         } => {
                             assert_eq!(path.parent(), Some(dir.path()));
-                            assert_eq!(*operation, if fail_create { "create" } else { "write" });
+                            assert_eq!(
+                                *operation,
+                                if fail_create {
+                                    WriteStep::Create
+                                } else {
+                                    WriteStep::Write
+                                }
+                            );
                             source.kind()
                         }
                         _ => panic!("unexpected error: {error:?}"),
@@ -808,6 +849,7 @@ mod tests {
         }
     }
 
+    /// Assures: KEY-STORE-001
     #[test]
     fn key_creation_does_not_overwrite_an_existing_file() {
         let dir = tempfile::tempdir().unwrap();

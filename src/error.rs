@@ -3,6 +3,88 @@ use std::{fmt, io, path::PathBuf};
 /// A fallible Tang operation.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The algorithm required for an operation on a server key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Algorithm {
+    Es512,
+    Ecmr,
+}
+
+impl Algorithm {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Es512 => "ES512",
+            Self::Ecmr => "ECMR",
+        }
+    }
+}
+
+impl fmt::Display for Algorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The JWK operation required of a server key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KeyOperation {
+    Sign,
+    Verify,
+    DeriveKey,
+}
+
+impl KeyOperation {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Sign => "sign",
+            Self::Verify => "verify",
+            Self::DeriveKey => "deriveKey",
+        }
+    }
+}
+
+impl fmt::Display for KeyOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The persistence step that failed. More steps may be added in future releases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WriteStep {
+    Create,
+    Write,
+}
+
+impl fmt::Display for WriteStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Create => "create",
+            Self::Write => "write",
+        })
+    }
+}
+
+/// The operation for which randomness could not be obtained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RandomPurpose {
+    KeyGeneration,
+    AdvertisementSigning,
+}
+
+impl fmt::Display for RandomPurpose {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::KeyGeneration => "key generation",
+            Self::AdvertisementSigning => "advertisement signing",
+        })
+    }
+}
+
 /// The origin of a stored key. Vector indices are zero-based.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -15,7 +97,7 @@ impl fmt::Display for KeyLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::File(path) => write!(f, "{}", path.display()),
-            Self::Input(index) => write!(f, "input key at index {index}"),
+            Self::Input(index) => write!(f, "input index {index}"),
         }
     }
 }
@@ -63,6 +145,31 @@ impl std::error::Error for JsonError {}
 
 /// Errors distinguish client inputs, server key configuration, and persistence.
 /// Private key values are never included in library-generated diagnostics.
+/// Validation reasons and serialization contexts are diagnostic text, not
+/// stable values for matching. Match variants and operation enums instead.
+///
+/// Stored-key validation causes can be matched directly without downcasting:
+///
+/// ```
+/// use tangy_lib::{Algorithm, Error, KeyLocation, KeyOperation};
+///
+/// let error = Error::InvalidStoredKey {
+///     location: KeyLocation::Input(2),
+///     source: Box::new(Error::ForbiddenOperation {
+///         kid: "key-id".into(),
+///         algorithm: Algorithm::Es512,
+///         operation: KeyOperation::Sign,
+///     }),
+/// };
+/// let missing_permission = match &error {
+///     Error::InvalidStoredKey { source, .. } => match source.as_ref() {
+///         Error::ForbiddenOperation { operation, .. } => Some(*operation),
+///         _ => None,
+///     },
+///     _ => None,
+/// };
+/// assert_eq!(missing_permission, Some(KeyOperation::Sign));
+/// ```
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -73,11 +180,11 @@ pub enum Error {
     #[error("incomplete key set (missing signing: {signing}, missing recovery: {recovery})")]
     MissingKeys { signing: bool, recovery: bool },
 
-    #[error("invalid stored key at {location}: {source}")]
+    #[error("invalid stored key at {location}")]
     InvalidStoredKey {
         location: KeyLocation,
         #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: Box<Error>,
     },
 
     #[error("invalid key: {reason}")]
@@ -97,8 +204,8 @@ pub enum Error {
     #[error("key {kid} does not permit {operation} with {algorithm}")]
     ForbiddenOperation {
         kid: String,
-        algorithm: &'static str,
-        operation: &'static str,
+        algorithm: Algorithm,
+        operation: KeyOperation,
     },
 
     #[error("unable to enumerate key directory {}", path.display())]
@@ -118,13 +225,14 @@ pub enum Error {
     #[error("unable to {operation} key file {}", path.display())]
     KeyWrite {
         path: PathBuf,
-        operation: &'static str,
+        operation: WriteStep,
         #[source]
         source: io::Error,
     },
 
     #[error("unable to serialize {context}")]
     Serialization {
+        /// Diagnostic text describing the serialized value; not a matching API.
         context: &'static str,
         #[source]
         source: serde_json::Error,
@@ -134,14 +242,14 @@ pub enum Error {
     Signing {
         kid: String,
         #[source]
-        source: p521::ecdsa::signature::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[error("unable to obtain randomness for {operation}")]
     Randomness {
-        operation: &'static str,
+        operation: RandomPurpose,
         #[source]
-        source: elliptic_curve::rand_core::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 

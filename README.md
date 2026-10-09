@@ -25,7 +25,7 @@ Or directly using in the dependencies section of Cargo.toml:
 
 ``` toml
 [dependencies]
-tangy-lib = "0.1"
+tangy-lib = "0.2"
 ```
 
 ## Usage
@@ -83,9 +83,33 @@ fn generate() -> tangy_lib::Result<Vec<String>> {
 
 On success this returns two private JWK strings: one ES512 signing key and one ECMR recovery key. It does not write files. Generation and advertisement signing obtain an OS seed through a fallible call, then use a ChaCha20 cryptographic generator with P-521. An entropy failure returns `Error::Randomness`; a signing failure returns `Error::Signing` with the signing key ID.
 
-All fallible public operations use the crate's `Result<T>` alias. `MyJwkEcKey::to_jwk_ec_key(public)` now returns `Result<JwkEcKey>` and validates P-521 key material, including matching public and private values for private conversion. `MyJwkEcKey::thumbprint()` returns `Result<String>`. Use `?` on these helpers and on `create_new_key_set()` when migrating from 0.1 or 0.2.0-alpha.1.
+All fallible public operations use the crate's `Result<T>` alias. `MyJwkEcKey::to_jwk_ec_key(public)` now returns `Result<JwkEcKey>` and validates P-521 key material, including matching public and private values for private conversion. `MyJwkEcKey::thumbprint()` returns `Result<String>`. Use `?` on these helpers and on `create_new_key_set()` when migrating from 0.1.
 
-The public `Error` enum is non-exhaustive, so callers should include a fallback arm when matching it. `InvalidStoredKey` identifies the file path or zero-based vector index and wraps the validation cause; `MissingKeys` identifies absent signing and recovery roles. `KeyDirectory`, `KeyRead`, and `KeyWrite` carry paths and preserve the underlying I/O error. `Serialization` preserves its cause and names the operation. Inspect `std::error::Error::source()` for diagnostics. JSON decoding causes use `JsonError`, which reports category, line, and column and deliberately stops the source chain before Serde's raw message, because type errors can quote private input values.
+The public `Error` enum is non-exhaustive, so callers should include a fallback arm when matching it. `InvalidStoredKey` identifies the file path or zero-based vector index and stores its validation cause as `Box<Error>`; callers can match `source.as_ref()` directly without downcasting. `MissingKeys` identifies absent signing and recovery roles.
+
+Operation fields use public, non-exhaustive enums rather than strings:
+
+- `ForbiddenOperation.algorithm` uses `Algorithm::{Es512, Ecmr}` and its `operation` uses `KeyOperation::{Sign, Verify, DeriveKey}`.
+- `KeyWrite.operation` uses `WriteStep::{Create, Write}`. `KeyDirectory`, `KeyRead`, and `KeyWrite` carry paths and preserve their I/O causes.
+- `Randomness.operation` uses `RandomPurpose::{KeyGeneration, AdvertisementSigning}`. Randomness and signing causes are opaque `Box<dyn std::error::Error + Send + Sync>` values, so the public fields remain independent of crypto dependency versions.
+
+For example, identify a missing permission in an invalid stored key:
+
+```rust
+use tangy_lib::{Error, KeyOperation};
+
+fn missing_permission(error: &Error) -> Option<KeyOperation> {
+    match error {
+        Error::InvalidStoredKey { source, .. } => match source.as_ref() {
+            Error::ForbiddenOperation { operation, .. } => Some(*operation),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+```
+
+Validation `reason` strings and `Serialization.context` are diagnostic text and may change; match error variants and enum fields for application logic. `Serialization` also preserves its cause. Top-level messages report context; inspect `std::error::Error::source()` to report each cause once. JSON decoding causes use `JsonError`, which reports category, line, and column and deliberately stops the source chain before Serde's raw message, because type errors can quote private input values.
 
 ## Testing
 
@@ -122,6 +146,34 @@ HTTP server on the loopback interface using this library and asks Clevis to
 encrypt and decrypt a secret through it. It exercises advertisements both with
 and without a requested signing-key thumbprint. No separately running Tang server
 is needed. The test fails if a required tool is missing or the client fails.
+
+On Fedora, you can use [scripts/install-interop-tools.sh](scripts/install-interop-tools.sh)
+to download and extract JOSE and Clevis under `/tmp` without installing system
+packages or using `sudo`. It requires DNF with its `download` command, RPM,
+`rpm2cpio`, `cpio`, Bash, coreutils (including `timeout`), curl, jq, and Python 3.
+The first run needs network access. Run from the repository root:
+
+```sh
+bash scripts/install-interop-tools.sh
+source /tmp/tangy-lib-interop/env.sh
+python3 scripts/check-fixtures.py
+cargo test --locked --features interop --test clevis
+```
+
+The default directory is `/tmp/tangy-lib-interop`; it holds package downloads,
+repository caches, extracted tools, and `env.sh`. Sourcing `env.sh` puts the local
+commands and shared libraries on `PATH` and `LD_LIBRARY_PATH` for the current
+shell. Source it again in each new shell before running the tests. If `/tmp` has
+been cleared, rerun the installer. You can choose another writable directory:
+
+```sh
+bash scripts/install-interop-tools.sh /tmp/tangy-interop
+source /tmp/tangy-interop/env.sh
+```
+
+The extracted tools support the Tang tests; this setup is not a system Clevis
+installation for configuring encrypted disks. Other Linux distributions can use
+their normal package manager as described above.
 
 CI runs the Rust build and tests on Linux and Windows, checks compatibility with
 Rust 1.85.1 on Linux, and runs the Clevis compatibility test in a separate Linux job.

@@ -115,6 +115,7 @@ fn serve(lib: &TangyLib, mut stream: TcpStream) -> io::Result<String> {
     Ok(path)
 }
 
+/// Assures: INTEROP-001
 #[test]
 fn clevis_encrypts_and_recovers_using_library_endpoints() {
     for signing in [vec![SIGNING], vec![SIGNING, SECOND_SIGNING]] {

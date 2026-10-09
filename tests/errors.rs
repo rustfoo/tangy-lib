@@ -4,7 +4,10 @@ use std::error::Error as StdError;
 
 use common::*;
 use serde_json::{json, Value};
-use tangy_lib::{Error, JsonError, KeyLocation, KeySource, TangyLib};
+use tangy_lib::{
+    Algorithm, Error, JsonError, KeyLocation, KeyOperation, KeySource, RandomPurpose, TangyLib,
+    WriteStep,
+};
 
 fn diagnostics(error: &dyn StdError) -> String {
     let mut messages = format!("{error} {error:?}");
@@ -16,6 +19,7 @@ fn diagnostics(error: &dyn StdError) -> String {
     messages
 }
 
+/// Assures: KEY-LOAD-001, ERR-DIAG-001
 #[test]
 fn incomplete_key_sets_identify_the_missing_roles() {
     for (keys, expected) in [
@@ -31,6 +35,7 @@ fn incomplete_key_sets_identify_the_missing_roles() {
     }
 }
 
+/// Assures: ERR-DIAG-001
 #[test]
 fn invalid_stored_keys_include_their_origin_and_safe_source_chain() {
     let error = TangyLib::init(KeySource::Vector(&vec![SIGNING, RECOVERY, "{"])).unwrap_err();
@@ -41,7 +46,10 @@ fn invalid_stored_keys_include_their_origin_and_safe_source_chain() {
             ..
         }
     ));
-    let invalid = error.source().unwrap().downcast_ref::<Error>().unwrap();
+    let Error::InvalidStoredKey { source, .. } = &error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let invalid = source.as_ref();
     assert!(matches!(invalid, Error::InvalidKey { .. }));
     let json = invalid
         .source()
@@ -62,6 +70,7 @@ fn invalid_stored_keys_include_their_origin_and_safe_source_chain() {
     assert!(error.source().is_some());
 }
 
+/// Assures: ERR-DIAG-001
 #[test]
 fn stored_policy_and_crypto_errors_retain_validation_causes() {
     let mut key: Value = serde_json::from_str(SIGNING).unwrap();
@@ -75,20 +84,164 @@ fn stored_policy_and_crypto_errors_retain_validation_causes() {
             ..
         }
     ));
+    let Error::InvalidStoredKey { source, .. } = &error else {
+        panic!("unexpected error: {error:?}");
+    };
     assert!(matches!(
-        error.source().unwrap().downcast_ref::<Error>().unwrap(),
-        Error::ForbiddenOperation { kid, algorithm: "ES512", operation: "sign" } if kid == &thumbprint(SIGNING)
+        source.as_ref(),
+        Error::ForbiddenOperation { kid, algorithm: Algorithm::Es512, operation: KeyOperation::Sign } if kid == &thumbprint(SIGNING)
     ));
 
     key["key_ops"] = json!(["sign", "verify"]);
     key["x"] = json!("%%%");
     let invalid = key.to_string();
     let error = TangyLib::init(KeySource::Vector(&vec![RECOVERY, &invalid])).unwrap_err();
-    let validation = error.source().unwrap().downcast_ref::<Error>().unwrap();
+    let Error::InvalidStoredKey { source, .. } = &error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let validation = source.as_ref();
     assert!(matches!(validation, Error::InvalidKey { .. }));
     assert!(validation.source().unwrap().is::<elliptic_curve::Error>());
 }
 
+/// Assures: ERR-DIAG-001
+#[test]
+fn stored_policy_errors_identify_every_required_operation() {
+    for (fixture, operations, algorithm, operation) in [
+        (
+            SIGNING,
+            json!(["verify"]),
+            Algorithm::Es512,
+            KeyOperation::Sign,
+        ),
+        (
+            SIGNING,
+            json!(["sign"]),
+            Algorithm::Es512,
+            KeyOperation::Verify,
+        ),
+        (
+            RECOVERY,
+            json!([]),
+            Algorithm::Ecmr,
+            KeyOperation::DeriveKey,
+        ),
+    ] {
+        let mut key: Value = serde_json::from_str(fixture).unwrap();
+        key["key_ops"] = operations;
+        let invalid = key.to_string();
+        let error = TangyLib::init(KeySource::Vector(&vec![&invalid])).unwrap_err();
+        let Error::InvalidStoredKey { location, source } = &error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(location, &KeyLocation::Input(0));
+        assert!(matches!(source.as_ref(), Error::ForbiddenOperation {
+            kid, algorithm: actual_algorithm, operation: actual_operation,
+        } if kid == &thumbprint(fixture) && *actual_algorithm == algorithm && *actual_operation == operation));
+    }
+}
+
+/// Assures: ERR-DIAG-001
+#[test]
+fn operation_displays_preserve_protocol_and_diagnostic_wording() {
+    for (actual, expected) in [
+        (Algorithm::Es512.to_string(), "ES512"),
+        (Algorithm::Ecmr.to_string(), "ECMR"),
+        (KeyOperation::Sign.to_string(), "sign"),
+        (KeyOperation::Verify.to_string(), "verify"),
+        (KeyOperation::DeriveKey.to_string(), "deriveKey"),
+        (WriteStep::Create.to_string(), "create"),
+        (WriteStep::Write.to_string(), "write"),
+        (RandomPurpose::KeyGeneration.to_string(), "key generation"),
+        (
+            RandomPurpose::AdvertisementSigning.to_string(),
+            "advertisement signing",
+        ),
+        (KeyLocation::Input(2).to_string(), "input index 2"),
+    ] {
+        assert_eq!(actual, expected);
+    }
+}
+
+/// Assures: ERR-DIAG-001
+#[test]
+fn top_level_messages_exclude_sources_and_chains_report_each_cause_once() {
+    let cause = || std::io::Error::other("source-marker");
+    let errors = [
+        Error::InvalidStoredKey {
+            location: KeyLocation::Input(2),
+            source: Box::new(Error::InvalidKey {
+                reason: "validation-marker",
+                source: Some(Box::new(cause())),
+            }),
+        },
+        Error::InvalidKey {
+            reason: "bad key",
+            source: Some(Box::new(cause())),
+        },
+        Error::InvalidRequest {
+            reason: "bad request",
+            source: Some(Box::new(cause())),
+        },
+        Error::KeyDirectory {
+            path: "keys".into(),
+            source: cause(),
+        },
+        Error::KeyRead {
+            path: "keys/key.jwk".into(),
+            source: cause(),
+        },
+        Error::KeyWrite {
+            path: "keys/key.jwk".into(),
+            operation: WriteStep::Write,
+            source: cause(),
+        },
+        Error::Serialization {
+            context: "test payload",
+            source: <serde_json::Error as serde::ser::Error>::custom("source-marker"),
+        },
+        Error::Signing {
+            kid: "key-id".into(),
+            source: Box::new(cause()),
+        },
+        Error::Randomness {
+            operation: RandomPurpose::KeyGeneration,
+            source: Box::new(cause()),
+        },
+    ];
+    for error in errors {
+        let top_level = error.to_string();
+        let mut chain = top_level.clone();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            let message = cause.to_string();
+            assert!(!top_level.contains(&message), "source repeated in {error}");
+            chain.push_str(&format!("\ncaused by: {cause}"));
+            source = cause.source();
+        }
+        assert_eq!(chain.matches("source-marker").count(), 1, "{chain}");
+        if matches!(error, Error::InvalidStoredKey { .. }) {
+            assert_eq!(top_level, "invalid stored key at input index 2");
+            assert_eq!(chain.matches("validation-marker").count(), 1, "{chain}");
+        }
+    }
+}
+
+/// Assures: ERR-DIAG-001
+#[test]
+fn signing_failures_retain_the_key_id_and_opaque_crypto_cause() {
+    let error = Error::Signing {
+        kid: "signing-key-id".into(),
+        source: Box::new(p521::ecdsa::signature::Error::new()),
+    };
+    assert!(matches!(&error, Error::Signing { kid, .. } if kid == "signing-key-id"));
+    assert!(error
+        .source()
+        .unwrap()
+        .is::<p521::ecdsa::signature::Error>());
+}
+
+/// Assures: ERR-DIAG-001
 #[test]
 fn persistence_errors_include_paths_and_original_io_errors() {
     let dir = tempfile::tempdir().unwrap();
@@ -120,6 +273,7 @@ fn persistence_errors_include_paths_and_original_io_errors() {
     );
 }
 
+/// Assures: REQ-REJECT-001, ERR-DIAG-001
 #[test]
 fn protocol_errors_distinguish_missing_keys_forbidden_operations_and_requests() {
     let library = library(&[SIGNING, RECOVERY]);
@@ -133,10 +287,10 @@ fn protocol_errors_distinguish_missing_keys_forbidden_operations_and_requests() 
         assert!(matches!(error, Error::KeyNotFound { kid } if kid == "unknown"));
     }
     assert!(
-        matches!(library.adv(Some(&id)), Err(Error::ForbiddenOperation { kid, algorithm: "ES512", operation: "sign" }) if kid == id)
+        matches!(library.adv(Some(&id)), Err(Error::ForbiddenOperation { kid, algorithm: Algorithm::Es512, operation: KeyOperation::Sign }) if kid == id)
     );
     assert!(
-        matches!(library.rec(&signing_id, &request), Err(Error::ForbiddenOperation { kid, algorithm: "ECMR", operation: "deriveKey" }) if kid == signing_id)
+        matches!(library.rec(&signing_id, &request), Err(Error::ForbiddenOperation { kid, algorithm: Algorithm::Ecmr, operation: KeyOperation::DeriveKey }) if kid == signing_id)
     );
 
     for request in ["{", "null", "{}"] {
@@ -158,6 +312,7 @@ fn protocol_errors_distinguish_missing_keys_forbidden_operations_and_requests() 
     }
 }
 
+/// Assures: KEY-PRIV-001
 #[test]
 fn invalid_conversion_helpers_return_typed_errors_without_private_values() {
     let secret = fixture_key(SIGNING).d.unwrap();
@@ -189,6 +344,7 @@ fn invalid_conversion_helpers_return_typed_errors_without_private_values() {
     assert!(public.to_jwk_ec_key(true).unwrap().is_public_key());
 }
 
+/// Assures: KEY-PRIV-001
 #[test]
 fn error_formatting_and_sources_do_not_echo_private_json_values() {
     let library = library(&[SIGNING, RECOVERY]);

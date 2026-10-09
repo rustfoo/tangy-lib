@@ -19,6 +19,7 @@ fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+/// Assures: KEY-STORE-001
 #[test]
 fn generated_keys_are_persisted_and_stable_across_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -65,6 +66,7 @@ fn generated_keys_are_persisted_and_stable_across_restart() {
     );
 }
 
+/// Assures: KEY-LOAD-001, KEY-STORE-001
 #[test]
 fn invalid_existing_stores_fail_without_changing_files() {
     for files in [
@@ -91,6 +93,7 @@ fn invalid_existing_stores_fail_without_changing_files() {
     }
 }
 
+/// Assures: KEY-LOAD-001
 #[test]
 fn unreadable_key_entry_and_invalid_utf8_are_not_skipped() {
     let dir = tempfile::tempdir().unwrap();
@@ -107,6 +110,7 @@ fn unreadable_key_entry_and_invalid_utf8_are_not_skipped() {
     assert_eq!(before, snapshot(dir.path()));
 }
 
+/// Assures: KEY-LOAD-001
 #[test]
 fn nonexistent_directory_and_regular_file_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
@@ -114,4 +118,18 @@ fn nonexistent_directory_and_regular_file_are_rejected() {
     let path = dir.path().join("file");
     fs::write(&path, "").unwrap();
     assert!(TangyLib::init(KeySource::LocalDir(&path)).is_err());
+}
+
+/// Assures: KEY-PERM-001
+#[cfg(target_os = "linux")]
+#[test]
+fn generated_key_files_are_read_only_for_owner_and_group() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    TangyLib::init(KeySource::LocalDir(dir.path())).unwrap();
+    let modes: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().permissions().mode() & 0o777)
+        .collect();
+    assert_eq!(modes, [0o440, 0o440]);
 }
