@@ -9,7 +9,7 @@ pub const SECOND_SIGNING: &str = include_str!("../fixtures/es512-second.json");
 pub const RECOVERY: &str = include_str!("../fixtures/ecmr.json");
 
 pub fn library(keys: &[&str]) -> TangyLib {
-    TangyLib::init(KeySource::Vector(&keys.to_vec())).unwrap()
+    TangyLib::init(KeySource::Vector(keys)).unwrap()
 }
 
 pub fn fixture_key(json: &str) -> MyJwkEcKey {

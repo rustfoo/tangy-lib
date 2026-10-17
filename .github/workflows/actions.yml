@@ -17,6 +17,7 @@ jobs:
     - name: Build & Test
       run: |
         cargo fmt --check
+        python3 scripts/test-check-assurance.py
         cargo check --locked --all-targets
         cargo clippy --locked --all-targets --all-features -- -D warnings
         cargo build --locked --release
@@ -33,18 +34,23 @@ jobs:
 
   rust-stable-windows:
     runs-on: blacksmith-2vcpu-windows-2025
-    
     steps:
-    
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
-
+    - uses: taiki-e/install-action@nextest
     - name: Build & Test
       run: |
         cargo check --locked --all-targets
         cargo build --locked --release
-        cargo test --locked
-
+        cargo test --locked --doc
+        cargo nextest run --locked --profile ci
+    - name: Upload test evidence
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: junit-windows
+        path: target/nextest/ci/junit.xml
+        if-no-files-found: error
 
   rust-msrv:
     runs-on: ubuntu-latest
@@ -85,7 +91,7 @@ jobs:
 
   # Every assertion in assurance/assertions.toml must be backed by passing tests.
   assurance:
-    needs: [rust-stable, clevis-interop]
+    needs: [rust-stable, rust-stable-windows, clevis-interop]
     if: ${{ !cancelled() }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
@@ -103,6 +109,7 @@ jobs:
         python3 scripts/check-assurance.py \
           --junit linux=${{ runner.temp }}/junit/junit-linux/junit.xml \
           --junit interop=${{ runner.temp }}/junit/junit-interop/junit.xml \
+          --junit windows=${{ runner.temp }}/junit/junit-windows/junit.xml \
           --out ${{ runner.temp }}/evidence.json
     - name: Upload evidence record
       if: ${{ !cancelled() }}

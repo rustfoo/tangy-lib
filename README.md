@@ -30,7 +30,7 @@ tangy-lib = "0.2"
 
 ## Usage
 
-Initialize `TangyLib` with a directory of key files or a vector of JSON Web Key (JWK) strings. JWK is the JSON format used to store and exchange keys:
+Initialize `TangyLib` with a directory of key files or a slice of JSON Web Key (JWK) strings. JWK is the JSON format used to store and exchange keys:
 
 ``` rust
 use std::path::Path;
@@ -40,19 +40,21 @@ fn open_directory(dir: &Path) -> Result<TangyLib> {
     TangyLib::init(KeySource::LocalDir(dir))
 }
 
-fn open_keys(keys: &Vec<&str>) -> Result<TangyLib> {
+fn open_keys(keys: &[&str]) -> Result<TangyLib> {
     TangyLib::init(KeySource::Vector(keys))
 }
 ```
 
-`LocalDir` loads files with the `.jwk` extension from an existing directory. If there are no `.jwk` entries, it generates and saves a new key set. `Vector` loads the supplied keys without writing files; an empty vector returns an error.
+`LocalDir` loads entries whose filenames end in `.jwk` from an existing directory. Names beginning with `.` identify rotated keys; all others are active. Unrelated files are ignored. Generation happens only when there are no active or rotated key entries. `Vector` accepts `&[&str]` and treats every input as active. `KeySource::KeySets { active: &[&str], rotated: &[&str] }` lets callers supply both sets explicitly. Neither slice input generates or writes keys.
 
-A key set must contain at least one signing key and one recovery key. Both use the P-521 elliptic curve and must include a private key with matching public coordinates. Each JWK identifies its role through its `alg` and `key_ops` fields:
+Every identity must be unique, including identical copies and copies across active and rotated sets. `Error::DuplicateKey` reports the thumbprint and both origins. Directory paths are sorted for deterministic diagnostics. Rotated keys receive the same validation as active keys.
+
+The active key set must contain at least one signing key and one recovery key. A rotated-only store or a store missing either active role fails without generating replacements. Both use the P-521 elliptic curve and must include a private key with matching public coordinates. Each JWK identifies its role through its `alg` and `key_ops` fields:
 
 - Signing keys use `alg: "ES512"` and must include both `sign` and `verify` in `key_ops`. They sign the server's advertisement so clients can verify it.
 - Recovery keys use `alg: "ECMR"` (Elliptic Curve Message Recovery) and must include `deriveKey` in `key_ops`. They let the server participate in a client's secret recovery.
 
-Initialization returns `tangy_lib::Error` for malformed, unreadable, or incomplete key sets, unsupported algorithms, missing key operations, and file creation or write failures. Validated signing and recovery keys are retained as typed crypto keys for subsequent operations. Existing invalid keys are not automatically replaced. Generated key files are written individually: if a write fails, files already created remain in the directory and may need repair before initialization can succeed.
+Initialization returns `tangy_lib::Error` for malformed, unreadable, or incomplete key sets, unsupported algorithms, missing key operations, and file creation or write failures. Validated signing and recovery keys are retained as typed crypto keys for subsequent operations. Existing invalid keys are not automatically replaced. New directory stores use the publication procedure described below; initialization returns success only after both keys are persisted. Existing key files remain unchanged on loading errors.
 
 The library provides two protocol responses: an advertisement containing the server's public keys and signatures, and a recovery response computed from a client's public key and the server's recovery key. Both methods return JSON strings:
 
@@ -67,9 +69,9 @@ fn responses(tangy: &TangyLib, kid: &str, data: &str) -> Result<(String, String)
 }
 ```
 
-Keys are identified by a thumbprint, a hash of their public JWK fields. `adv(None)` signs the advertisement with all signing keys. `adv(Some(thumbprint))` requires that the identified key exists and permits signing, and includes its signature along with those of the other signing keys. This allows Clevis clients to verify every signing key in the advertisement. An unknown thumbprint returns `Error::KeyNotFound` with the requested ID; a key that does not permit signing returns `Error::ForbiddenOperation`.
+Keys are identified by a thumbprint, a hash of their public JWK fields. Advertisements contain only active public keys. `adv(None)` signs with every active signing key. `adv(Some(thumbprint))` requires that the identified active or rotated key permits signing, and adds the selected rotated signer's signature alongside every active signer's signature. Selecting an active signer does not duplicate its signature. This allows Clevis clients to verify every signing key in the advertisement. An unknown thumbprint returns `Error::KeyNotFound` with the requested ID; a key that does not permit signing returns `Error::ForbiddenOperation`.
 
-For `rec(&kid, &data)`, `kid` is the thumbprint of a server recovery key and `data` is the client's public key encoded as a JWK string. The client key must describe a valid point on P-521. Its `alg` and `key_ops` fields are optional; if present, `alg` must be `"ECMR"` and `key_ops` must include `"deriveKey"`. Unknown keys return `Error::KeyNotFound`, unsuitable server keys return `Error::ForbiddenOperation`, and invalid client keys return `Error::InvalidRequest`.
+For `rec(&kid, &data)`, `kid` is the thumbprint of an active or rotated server recovery key and `data` is the client's public key encoded as a JWK string. The client key must describe a valid point on P-521. Its `alg` and `key_ops` fields are optional; if present, `alg` must be `"ECMR"` and `key_ops` must include `"deriveKey"`. Unknown keys return `Error::KeyNotFound`, unsuitable server keys return `Error::ForbiddenOperation`, and invalid client keys return `Error::InvalidRequest`.
 
 Advertisements use JSON Web Signature (JWS) format with unpadded Base64URL fields. Neither advertisements nor recovery responses include private key material.
 
@@ -85,12 +87,12 @@ On success this returns two private JWK strings: one ES512 signing key and one E
 
 All fallible public operations use the crate's `Result<T>` alias. `MyJwkEcKey::to_jwk_ec_key(public)` now returns `Result<JwkEcKey>` and validates P-521 key material, including matching public and private values for private conversion. `MyJwkEcKey::thumbprint()` returns `Result<String>`. Use `?` on these helpers and on `create_new_key_set()` when migrating from 0.1.
 
-The public `Error` enum is non-exhaustive, so callers should include a fallback arm when matching it. `InvalidStoredKey` identifies the file path or zero-based vector index and stores its validation cause as `Box<Error>`; callers can match `source.as_ref()` directly without downcasting. `MissingKeys` identifies absent signing and recovery roles.
+The public `Error` enum is non-exhaustive, so callers should include a fallback arm when matching it. `InvalidStoredKey` identifies the file path or zero-based active/rotated input index and stores its validation cause as `Box<Error>`; callers can match `source.as_ref()` directly without downcasting. `MissingKeys` identifies absent signing and recovery roles.
 
 Operation fields use public, non-exhaustive enums rather than strings:
 
 - `ForbiddenOperation.algorithm` uses `Algorithm::{Es512, Ecmr}` and its `operation` uses `KeyOperation::{Sign, Verify, DeriveKey}`.
-- `KeyWrite.operation` uses `WriteStep::{Create, Write}`. `KeyDirectory`, `KeyRead`, and `KeyWrite` carry paths and preserve their I/O causes.
+- `KeyWrite.operation` uses `WriteStep::{Create, Write, Synchronize, Publish}`. `KeyDirectory`, `KeyRead`, and `KeyWrite` carry paths and preserve their I/O causes.
 - `Randomness.operation` uses `RandomPurpose::{KeyGeneration, AdvertisementSigning}`. Randomness and signing causes are opaque `Box<dyn std::error::Error + Send + Sync>` values, so the public fields remain independent of crypto dependency versions.
 
 For example, identify a missing permission in an invalid stored key:
@@ -110,6 +112,74 @@ fn missing_permission(error: &Error) -> Option<KeyOperation> {
 ```
 
 Validation `reason` strings and `Serialization.context` are diagnostic text and may change; match error variants and enum fields for application logic. `Serialization` also preserves its cause. Top-level messages report context; inspect `std::error::Error::source()` to report each cause once. JSON decoding causes use `JsonError`, which reports category, line, and column and deliberately stops the source chain before Serde's raw message, because type errors can quote private input values.
+
+## Key storage and rotation
+
+A store with no `.jwk` entries is initialized with a new key set. Like Tang,
+initialization assumes one process starts with a given store: starting several
+processes on the same empty directory at once is unsupported, and each may
+generate its own key set.
+
+Both keys are generated and validated, and the default advertisement is built,
+before anything is written. Each key is written to a temporary
+`.tangy-<thumbprint>.tmp` file, flushed, and renamed to `<thumbprint>.jwk`; on
+Unix the directory is then synchronized. Initialization returns success only
+after both keys are persisted. If any step fails, files created by that call
+are removed and the original error is returned. After a crash, key files are
+complete or absent: leftover `.tmp` files are ignored, so a crash before the
+first rename leaves an empty store that regenerates on the next start. A crash
+between the two renames leaves a single key, which reports `MissingKeys` until
+an operator removes it or restores a complete pair. Complete stores load without
+writing, so directory write access is not required.
+
+On Unix, files are created with mode `0440` and set to `0440` through the open
+handle before writing, so the final mode does not depend on the caller's umask.
+Owner and group read access is intentional, matching Tang. The library never
+changes the process umask. On Windows, generated files retain inherited
+directory ACLs: secure the store directory before initializing. Windows flushes
+file contents but has weaker namespace crash durability than Unix directory
+synchronization.
+
+Like [Tang](https://github.com/latchset/tang/blob/master/src/keys.c), the store
+root and key files are read through symlinks, so Kubernetes Secret volumes and
+other linked layouts work. A key entry must resolve to a regular file: dangling
+links fail with `KeyRead`, and links to directories or FIFOs fail with
+`NotAFile`. Operators control where links point and must coordinate manual
+edits. The store must already exist.
+
+For manual Tang-compatible rotation:
+
+1. Stop the service and any initializers, and back up the store securely.
+2. Generate and install a new active signing/recovery pair under new `.jwk`
+   filenames, preserving the documented permissions or secured Windows ACLs.
+3. Prefix the previous active filenames with `.` to mark them rotated. Keep
+   these files while any client still depends on their keys; do not copy them
+   into both sets because duplicate identities fail.
+4. Validate the directory with `TangyLib::init(KeySource::LocalDir(...))`, then
+   restart the service. Old recovery keys remain usable; `/adv/<old-signing-id>`
+   returns the active set with an additional old-key signature. Clients that
+   retain the old public key can verify that signature.
+
+A rotated-only store fails closed; the library provides no public rotation
+helper. This follows [Tang's key handling](https://github.com/latchset/tang/blob/master/src/keys.c)
+with that explicit empty-active-set policy.
+
+Stock Clevis enrollment requires `thp` to match a signing key in the advertised
+payload, so creating a new binding with a retired thumbprint fails its trust
+check even though the old signature is valid. Update enrollment configuration
+to the current active signing thumbprint after rotation. Existing bindings
+continue to decrypt through the rotated recovery keys. A client retaining the
+old public signing key can independently verify the new advertisement's old-key
+signature. This limitation also follows from Tang's active-only payloads and
+[Clevis's trust check](https://github.com/latchset/clevis/blob/master/src/pins/tang/clevis-encrypt-tang).
+
+Private JWK `Debug` output redacts `d`, and library debug output redacts typed
+private keys. Public conversion copies only public fields. Library-owned private
+JSON, parsed scalar strings, conversion strings, scalar encoding buffers and
+entropy seeds use zeroizing wrappers. Public field types and generation's
+`Vec<String>` return type stay unchanged. Caller-owned strings, copies, crypto
+implementation internals and allocator/serialization temporaries remain outside
+these guarantees; this is not a claim of complete memory erasure.
 
 ## Testing
 

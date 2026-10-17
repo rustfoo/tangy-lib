@@ -28,6 +28,10 @@ base64ct = "1.8"
 sha2 = "0.10"
 thiserror = "2"
 rand_chacha = "0.3"
+zeroize = { version = "1.8", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

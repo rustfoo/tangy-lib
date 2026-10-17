@@ -57,6 +57,8 @@ impl fmt::Display for KeyOperation {
 pub enum WriteStep {
     Create,
     Write,
+    Synchronize,
+    Publish,
 }
 
 impl fmt::Display for WriteStep {
@@ -64,6 +66,8 @@ impl fmt::Display for WriteStep {
         f.write_str(match self {
             Self::Create => "create",
             Self::Write => "write",
+            Self::Synchronize => "synchronize",
+            Self::Publish => "publish",
         })
     }
 }
@@ -85,12 +89,13 @@ impl fmt::Display for RandomPurpose {
     }
 }
 
-/// The origin of a stored key. Vector indices are zero-based.
+/// The origin of a stored key. Active and rotated input indices are zero-based.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeyLocation {
     File(PathBuf),
     Input(usize),
+    RotatedInput(usize),
 }
 
 impl fmt::Display for KeyLocation {
@@ -98,6 +103,7 @@ impl fmt::Display for KeyLocation {
         match self {
             Self::File(path) => write!(f, "{}", path.display()),
             Self::Input(index) => write!(f, "input index {index}"),
+            Self::RotatedInput(index) => write!(f, "rotated input index {index}"),
         }
     }
 }
@@ -179,6 +185,16 @@ pub enum Error {
     /// Each flag is true when that key role is missing.
     #[error("incomplete key set (missing signing: {signing}, missing recovery: {recovery})")]
     MissingKeys { signing: bool, recovery: bool },
+
+    #[error("duplicate key {kid} at {first} and {second}")]
+    DuplicateKey {
+        kid: String,
+        first: KeyLocation,
+        second: KeyLocation,
+    },
+
+    #[error("key entry {} is not a regular file", path.display())]
+    NotAFile { path: PathBuf },
 
     #[error("invalid stored key at {location}")]
     InvalidStoredKey {

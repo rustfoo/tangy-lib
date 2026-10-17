@@ -102,7 +102,7 @@ fn malformed_or_incomplete_vectors_return_errors() {
     }
 }
 
-/// Assures: KEY-LOAD-001
+/// Assures: KEY-LOAD-001, KEY-VALID-001
 #[test]
 fn invalid_stored_keys_return_errors() {
     for source in [SIGNING, RECOVERY] {
@@ -131,13 +131,80 @@ fn invalid_stored_keys_return_errors() {
             let bad = key.to_string();
             let good = if source == SIGNING { RECOVERY } else { SIGNING };
             assert!(
-                TangyLib::init(KeySource::Vector(&vec![good, &bad])).is_err(),
+                TangyLib::init(KeySource::Vector(&[good, &bad])).is_err(),
                 "accepted invalid {field}"
             );
         }
         let mut key: Value = serde_json::from_str(source).unwrap();
         key.as_object_mut().unwrap().remove("d");
         let bad = key.to_string();
-        assert!(TangyLib::init(KeySource::Vector(&vec![SIGNING, RECOVERY, &bad])).is_err());
+        assert!(TangyLib::init(KeySource::Vector(&[SIGNING, RECOVERY, &bad])).is_err());
     }
+}
+
+/// Assures: KEY-PRIV-001
+#[test]
+fn direct_jwk_debug_redacts_the_scalar_and_public_conversion_preserves_metadata() {
+    for json in [SIGNING, RECOVERY] {
+        let key = fixture_key(json);
+        for output in [format!("{key:?}"), format!("{key:#?}")] {
+            assert!(!output.contains(key.d.as_ref().unwrap()));
+            assert!(output.contains("[REDACTED]"));
+            assert!(output.contains(&key.x));
+        }
+        let public = key.to_public_key();
+        assert!(public.d.is_none());
+        assert_eq!(key.d, fixture_key(json).d);
+        let mut expected = serde_json::to_value(&key).unwrap();
+        expected.as_object_mut().unwrap().remove("d");
+        assert_eq!(serde_json::to_value(public).unwrap(), expected);
+    }
+}
+
+/// Assures: KEY-PRIV-001
+#[test]
+fn library_debug_redacts_active_and_rotated_private_keys() {
+    let generated = create_new_key_set().unwrap();
+    let active: Vec<_> = generated.iter().map(String::as_str).collect();
+    let lib = TangyLib::init(KeySource::KeySets {
+        active: &active,
+        rotated: &[SIGNING, RECOVERY],
+    })
+    .unwrap();
+    for output in [format!("{lib:?}"), format!("{lib:#?}")] {
+        assert!(output.contains("[REDACTED]"));
+        for json in active.iter().copied().chain([SIGNING, RECOVERY]) {
+            assert!(!output.contains(fixture_key(json).d.as_ref().unwrap()));
+        }
+    }
+}
+
+/// Assures: KEY-VALID-001
+#[test]
+fn optional_metadata_and_extra_operations_do_not_add_restrictions() {
+    let mut signing: Value = serde_json::from_str(SIGNING).unwrap();
+    signing["use"] = json!("arbitrary optional use");
+    signing["kid"] = json!("not the thumbprint");
+    signing["key_ops"] = json!(["sign", "verify", "extra"]);
+    signing["x5c"] = json!("opaque certificate metadata");
+    let signing = signing.to_string();
+    let active = library(&[&signing, RECOVERY]);
+    let rotated = TangyLib::init(KeySource::KeySets {
+        active: &[SECOND_SIGNING, RECOVERY],
+        rotated: &[&signing],
+    })
+    .unwrap();
+    active.adv(Some(&thumbprint(SIGNING))).unwrap();
+    rotated.adv(Some(&thumbprint(SIGNING))).unwrap();
+    let adv: Value = serde_json::from_str(&active.adv(None).unwrap()).unwrap();
+    let body = payload(&adv);
+    let key = body["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|key| key["alg"] == "ES512")
+        .unwrap();
+    assert_eq!(key["use"], "arbitrary optional use");
+    assert_eq!(key["kid"], "not the thumbprint");
+    assert_eq!(key["key_ops"], json!(["verify", "extra"]));
 }

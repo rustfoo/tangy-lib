@@ -8,6 +8,20 @@ This changelog follows the Keep a Changelog format.
 
 ### Added
 
+- Tang-compatible active and rotated key sets, `KeySource::KeySets`, and typed
+  `DuplicateKey` and `NotAFile` errors.
+- A private key-store module that writes generated keys to temporary files and
+  renames them into place, so key files are complete or absent after a crash.
+  Leftover `.tmp` files are ignored, and failed initialization removes the files
+  it created. As in Tang, simultaneous first starts on one store are unsupported.
+- Test-only environment fault points for persistence failures, process-death
+  coverage, Unix permissive-umask tests, Windows ACL inheritance and junction
+  tests, and a stock Clevis rotation round trip. The latter verifies the old signature with JOSE,
+  confirms Clevis's retired-thumbprint enrollment limitation, and enrolls new
+  bindings with the current thumbprint.
+- Platform-specific assurance minimums, Windows nextest/JUnit artifacts, and
+  checker regression tests. Full local assurance requires Windows evidence.
+
 - A typed error API backed by `thiserror` 2: public non-exhaustive `Error` and
   `KeyLocation` enums, a `Result<T>` alias, and a safe `JsonError` wrapper. Errors
   distinguish invalid client requests, invalid server keys, missing keys and key
@@ -42,13 +56,31 @@ This changelog follows the Keep a Changelog format.
   a tagged test failed, was skipped, did not run, or names an unknown assertion.
   `scripts/check-assurance-local.sh` runs the full pipeline, including Clevis,
   locally. See `assurance/README.md`.
-- A CI `assurance` job that checks every assertion against the Linux and
-  Clevis test reports, uploads an `evidence.json` record with the commit and
+- A CI `assurance` job that checks every assertion against the Linux, Windows
+  and Clevis test reports, uploads an `evidence.json` record with the commit and
   `Cargo.lock` hash, and attests it with a signed GitHub artifact attestation
   on pushes.
-- A regression test that generated key files have mode 0440 on Linux.
+- Regression tests for Unix creation-time restrictions and final mode 0440,
+  plus Windows inheritance from a secured directory ACL.
 
 ### Changed
+
+- **Breaking:** `KeySource::Vector` takes `&[&str]` instead of `&Vec<&str>`.
+  Vector keys remain active; explicit `KeySets` inputs can mark rotated keys.
+- Only active public keys are advertised and active signing keys sign by
+  default. An explicitly selected rotated signer adds one signature over the
+  active payload; recovery accepts active and rotated ECMR keys. Both active
+  roles remain required; rotated-only stores fail without generation.
+- Repeated thumbprints fail with both origins, including identical copies
+  and metadata conflicts. Directory diagnostics are deterministic.
+- Unix files are restrictive from creation and have final mode `0440` without
+  changing process umask. Windows files inherit the secured store's ACLs.
+  Windows namespace crash durability remains weaker than Unix directory sync.
+- JWK debug formatting redacts private scalars; public conversion avoids
+  cloning them. Library-owned secret temporaries use zeroizing wrappers without
+  changing public string types or claiming complete memory erasure.
+- `KeyLocation` adds `RotatedInput`; `WriteStep` adds `Synchronize` and
+  `Publish`.
 
 - **Breaking:** `init`, `adv`, `adv_internal`, and `rec` return the crate's
   typed `Result`. `create_new_key_set`, `MyJwkEcKey::to_jwk_ec_key`, and
@@ -84,8 +116,8 @@ This changelog follows the Keep a Changelog format.
   `key_ops`, but supplied values must allow ECMR and `deriveKey`.
 - CI runs on pull requests as well as pushes, uses locked dependencies for
   builds and tests, checks all targets, and checks formatting on Linux.
-- Linux and Clevis CI jobs run tests with cargo-nextest using the `ci` profile
-  in `.config/nextest.toml` and upload JUnit reports; doctests run separately
+- Linux, Windows and Clevis CI jobs run tests with cargo-nextest using the `ci`
+  profile in `.config/nextest.toml` and upload JUnit reports; doctests run separately
   with `cargo test --doc`.
 - Updated locked dependency versions.
 - Expanded the README with key roles, initialization and persistence behavior,
@@ -110,8 +142,10 @@ This changelog follows the Keep a Changelog format.
   errors instead of silently skipping invalid entries. Malformed or unreadable
   stores no longer trigger automatic key generation.
 - Initialization propagates generated key file creation and write failures.
-  New files use exclusive creation to avoid overwriting existing files. Writes
-  remain non-transactional, so a failure can leave a partial key set.
+  Generated keys are renamed into place from temporary files, and failures
+  remove the files created by that initialization.
+- Like Tang, store roots and key files are read through symlinks (for example
+  Kubernetes Secret volumes); key entries must resolve to regular files.
 - Invalid recovery requests and invalid keys encountered during advertisement
   or recovery return typed errors instead of panicking. Advertisement signing
   and response serialization failures also return errors.

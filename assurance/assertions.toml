@@ -13,8 +13,8 @@ min_evidence = 3
 
 [[assertion]]
 id = "KEY-PRIV-001"
-statement = "Advertisements, recovery responses, error messages and debug output never contain private key material."
-min_evidence = 4
+statement = "Advertisements, recovery responses, error messages and direct JWK/library debug output never expose private key scalars."
+min_evidence = 6
 
 [[assertion]]
 id = "REC-CORRECT-001"
@@ -33,13 +33,14 @@ min_evidence = 3
 
 [[assertion]]
 id = "KEY-STORE-001"
-statement = "Generated keys persist with stable identities across restarts, and existing key files are never overwritten or modified, including by failed initialisation."
+statement = "Generated keys persist with stable identities across restarts, and existing key files are never overwritten or modified, including by failed initialisation; leftover temporary files are ignored."
 min_evidence = 3
 
 [[assertion]]
 id = "KEY-PERM-001"
-statement = "On Linux, key files are created with mode 0440 (read-only for owner and group)."
+statement = "On Unix, key files are restricted from creation, have final mode 0440 (owner and group read), and never require changing the process umask."
 min_evidence = 1
+required_reports = ["linux"]
 
 [[assertion]]
 id = "KEY-ID-001"
@@ -60,3 +61,41 @@ min_evidence = 4
 id = "INTEROP-001"
 statement = "A stock Clevis client can encrypt against the library's advertisements and decrypt through its recovery endpoint, with one or two signing keys."
 min_evidence = 1
+
+[[assertion]]
+id = "KEY-VALID-001"
+statement = "Active and rotated stored keys receive curve, key type, scalar/public-point, algorithm and required-operation validation."
+min_evidence = 2
+
+[[assertion]]
+id = "KEY-DUP-001"
+statement = "Every duplicate identity fails with both origins, including identical copies and conflicting metadata across active and rotated sets."
+min_evidence = 2
+
+[[assertion]]
+id = "KEY-PATH-001"
+statement = "Like Tang, store roots and key files are read through symlinks and junctions, and key entries must resolve to regular files."
+min_evidence = 2
+required_reports = ["linux", "windows"]
+
+[[assertion]]
+id = "KEY-PUBLISH-001"
+statement = "Initialization succeeds only after both keys are persisted; failures remove files created by that call, and crashes leave only complete key files."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-ROTATE-001"
+statement = "Rotated keys remain recoverable, stay unadvertised and sign the active payload only when selected."
+min_evidence = 3
+
+[[assertion]]
+id = "KEY-PERM-WINDOWS-001"
+statement = "Generated Windows key files inherit the secured directory ACL."
+min_evidence = 1
+required_reports = ["windows"]
+
+[[assertion]]
+id = "INTEROP-ROTATE-001"
+statement = "Stock Clevis decrypts pre-rotation bindings and enrolls with the current thumbprint; JOSE verifies an old signer on the active payload, while Clevis rejects an absent old thumbprint."
+min_evidence = 1
+required_reports = ["interop"]

@@ -23,17 +23,12 @@
 //! ```
 
 mod error;
+mod key_store;
 pub use error::{
     Algorithm, Error, JsonError, KeyLocation, KeyOperation, RandomPurpose, Result, WriteStep,
 };
 
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{self, Write},
-    path::Path,
-    str::FromStr,
-};
+use std::{collections::BTreeMap, path::Path, str::FromStr};
 
 use base64ct::{Base64UrlUnpadded, Encoding};
 use elliptic_curve::{
@@ -45,10 +40,11 @@ use p521::ecdsa::{self, signature::RandomizedSigner, SigningKey};
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use sha2::Digest;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug)]
 pub struct TangyLib {
-    keys: HashMap<String, StoredKey>,
+    keys: BTreeMap<String, StoredKey>,
     default_adv: String,
 }
 
@@ -57,6 +53,7 @@ pub struct TangyLib {
 struct StoredKey {
     public: MyJwkEcKey,
     material: KeyMaterial,
+    active: bool,
 }
 
 // Avoid formatting crypto private keys, including through TangyLib's Debug.
@@ -74,62 +71,38 @@ impl std::fmt::Debug for KeyMaterial {
     }
 }
 
+/// Private key inputs. Every set must have active signing and recovery keys.
 #[derive(PartialEq)]
 pub enum KeySource<'a> {
+    /// Load `.jwk` entries; dot-prefixed filenames identify rotated keys.
+    /// A genuinely empty store is initialized through locked staged publication.
     LocalDir(&'a Path),
-    Vector(&'a Vec<&'a str>),
+    /// Load an entirely active slice without generating or writing keys.
+    Vector(&'a [&'a str]),
+    /// Load explicit active and rotated slices without persistence or generation.
+    KeySets {
+        active: &'a [&'a str],
+        rotated: &'a [&'a str],
+    },
 }
 
 impl TangyLib {
     pub fn init(source: KeySource) -> Result<Self> {
-        Self::init_with_key_writer(source, create_key_file)
+        key_store::initialize(source)
     }
 
-    // Keep the file-opening boundary injectable so write failures can be tested
-    // on every platform, including when tests run with elevated privileges.
-    fn init_with_key_writer<W: Write>(
-        source: KeySource,
-        mut create: impl FnMut(&Path) -> io::Result<W>,
-    ) -> Result<Self> {
-        let mut loaded_keys = match source {
-            KeySource::LocalDir(dir) => load_keys_from_dir(dir)?,
-            KeySource::Vector(keys) => load_keys_from_vec(keys)?,
-        };
-
-        if loaded_keys.is_empty() {
-            if let KeySource::LocalDir(dir) = source {
-                for json in create_new_key_set()? {
-                    let jwk = parse_stored_key(&json)?;
-                    let kid = jwk.thumbprint()?;
-                    let key = validate_stored_key(jwk, &kid)?;
-                    let path = dir.join(format!("{kid}.jwk"));
-                    let mut file = create(&path).map_err(|source| Error::KeyWrite {
-                        path: path.clone(),
-                        operation: WriteStep::Create,
-                        source,
-                    })?;
-                    file.write_all(json.as_bytes())
-                        .map_err(|source| Error::KeyWrite {
-                            path,
-                            operation: WriteStep::Write,
-                            source,
-                        })?;
-                    loaded_keys.insert(kid, key);
-                }
-            }
-        }
-
-        let signing = !loaded_keys
+    fn from_keys(keys: BTreeMap<String, StoredKey>) -> Result<Self> {
+        let signing = !keys
             .values()
-            .any(|key| matches!(key.material, KeyMaterial::Signing(_)));
-        let recovery = !loaded_keys
+            .any(|key| key.active && matches!(key.material, KeyMaterial::Signing(_)));
+        let recovery = !keys
             .values()
-            .any(|key| matches!(key.material, KeyMaterial::Recovery(_)));
+            .any(|key| key.active && matches!(key.material, KeyMaterial::Recovery(_)));
         if signing || recovery {
             return Err(Error::MissingKeys { signing, recovery });
         }
         let mut tangy = Self {
-            keys: loaded_keys,
+            keys,
             default_adv: String::new(),
         };
         tangy.default_adv = tangy.adv_internal(None)?;
@@ -184,7 +157,12 @@ impl TangyLib {
 
         let payload = Base64UrlUnpadded::encode_string(&serialize(
             &Payload {
-                keys: self.keys.values().map(|key| &key.public).collect(),
+                keys: self
+                    .keys
+                    .values()
+                    .filter(|key| key.active)
+                    .map(|key| &key.public)
+                    .collect(),
             },
             "advertisement payload",
         )?);
@@ -195,6 +173,9 @@ impl TangyLib {
         // Like Tang, retain signatures for every advertised verification key.
         let mut signatures = Vec::new();
         for (kid, key) in &self.keys {
+            if !key.active && skid != Some(kid.as_str()) {
+                continue;
+            }
             if let KeyMaterial::Signing(signing) = &key.material {
                 let signature: ecdsa::Signature = signing
                     .try_sign_with_rng(&mut rng, to_sign.as_bytes())
@@ -241,7 +222,7 @@ impl TangyLib {
                 })
             }
         };
-        let request_key: MyJwkEcKey = serde_json::from_str(request)
+        let request_key = parse_private_jwk(request)
             .map_err(|source| Error::request_cause("invalid JSON", JsonError(source)))?;
         if request_key.alg.as_deref().is_some_and(|alg| alg != "ECMR") {
             return Err(Error::request("algorithm must be ECMR"));
@@ -274,9 +255,11 @@ pub fn create_new_key_set() -> Result<Vec<String>> {
 
 fn create_new_key_set_with_rng(entropy: &mut impl CryptoRngCore) -> Result<Vec<String>> {
     let mut rng = crypto_rng(entropy, RandomPurpose::KeyGeneration)?;
+    let mut signing = Zeroizing::new(create_new_jwk("ES512", &["sign", "verify"], &mut rng)?);
+    let mut recovery = Zeroizing::new(create_new_jwk("ECMR", &["deriveKey"], &mut rng)?);
     Ok(vec![
-        create_new_jwk("ES512", &["sign", "verify"], &mut rng)?,
-        create_new_jwk("ECMR", &["deriveKey"], &mut rng)?,
+        std::mem::take(&mut *signing),
+        std::mem::take(&mut *recovery),
     ])
 }
 
@@ -284,10 +267,14 @@ fn create_new_key_set_with_rng(entropy: &mut impl CryptoRngCore) -> Result<Vec<S
 // CSPRNG through a fallible call before entering those APIs. ChaCha20's fills
 // cannot fail and every operation receives a fresh OS seed.
 fn crypto_rng(entropy: &mut impl CryptoRngCore, operation: RandomPurpose) -> Result<ChaCha20Rng> {
-    ChaCha20Rng::from_rng(entropy).map_err(|source| Error::Randomness {
-        operation,
-        source: Box::new(source),
-    })
+    let mut seed = Zeroizing::new([0u8; 32]);
+    entropy
+        .try_fill_bytes(seed.as_mut())
+        .map_err(|source| Error::Randomness {
+            operation,
+            source: Box::new(source),
+        })?;
+    Ok(ChaCha20Rng::from_seed(*seed))
 }
 
 fn serialize<T: Serialize>(value: &T, context: &'static str) -> Result<Vec<u8>> {
@@ -319,81 +306,11 @@ fn require_operation(
     Ok(())
 }
 
-fn create_key_file(path: &Path) -> io::Result<File> {
-    let file = File::options().write(true).create_new(true).open(path)?;
-    set_file_permissions(&file)?;
-    Ok(file)
+fn parse_stored_key(json: &str) -> Result<Zeroizing<MyJwkEcKey>> {
+    parse_private_jwk(json).map_err(|source| Error::key_cause("invalid JSON", JsonError(source)))
 }
 
-#[cfg(target_os = "linux")]
-fn set_file_permissions(file: &File) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = file.metadata()?.permissions();
-    perms.set_mode(0o440); // Read access for owner and group.
-    file.set_permissions(perms)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_file_permissions(_file: &File) -> io::Result<()> {
-    Ok(())
-}
-
-fn load_keys_from_dir(db_path: &Path) -> Result<HashMap<String, StoredKey>> {
-    let mut loaded = HashMap::new();
-    let entries = db_path.read_dir().map_err(|source| Error::KeyDirectory {
-        path: db_path.into(),
-        source,
-    })?;
-    for entry in entries {
-        let path = entry
-            .map_err(|source| Error::KeyDirectory {
-                path: db_path.into(),
-                source,
-            })?
-            .path();
-        if path.extension() == Some(std::ffi::OsStr::new("jwk")) {
-            let json = std::fs::read_to_string(&path).map_err(|source| Error::KeyRead {
-                path: path.clone(),
-                source,
-            })?;
-            load_stored_key(&mut loaded, &json, KeyLocation::File(path))?;
-        }
-    }
-    Ok(loaded)
-}
-
-fn load_keys_from_vec<T: AsRef<str>>(keys: &[T]) -> Result<HashMap<String, StoredKey>> {
-    let mut loaded = HashMap::new();
-    for (index, json) in keys.iter().enumerate() {
-        load_stored_key(&mut loaded, json.as_ref(), KeyLocation::Input(index))?;
-    }
-    Ok(loaded)
-}
-
-fn load_stored_key(
-    loaded: &mut HashMap<String, StoredKey>,
-    json: &str,
-    location: KeyLocation,
-) -> Result<()> {
-    let load = || -> Result<(String, StoredKey)> {
-        let jwk = parse_stored_key(json)?;
-        let kid = jwk.thumbprint()?;
-        let key = validate_stored_key(jwk, &kid)?;
-        Ok((kid, key))
-    };
-    let (kid, key) = load().map_err(|source| Error::InvalidStoredKey {
-        location,
-        source: Box::new(source),
-    })?;
-    loaded.insert(kid, key);
-    Ok(())
-}
-
-fn parse_stored_key(json: &str) -> Result<MyJwkEcKey> {
-    serde_json::from_str(json).map_err(|source| Error::key_cause("invalid JSON", JsonError(source)))
-}
-
-fn validate_stored_key(jwk: MyJwkEcKey, kid: &str) -> Result<StoredKey> {
+fn validate_stored_key(jwk: Zeroizing<MyJwkEcKey>, kid: &str) -> Result<StoredKey> {
     match jwk.alg.as_deref() {
         Some("ES512") => {
             require_operation(&jwk, kid, Algorithm::Es512, KeyOperation::Sign)?;
@@ -417,16 +334,22 @@ fn validate_stored_key(jwk: MyJwkEcKey, kid: &str) -> Result<StoredKey> {
     if let Some(ops) = &mut public.key_ops {
         ops.retain(|op| op != "sign");
     }
-    Ok(StoredKey { public, material })
+    Ok(StoredKey {
+        public,
+        material,
+        active: true,
+    })
 }
 
 fn create_new_jwk(alg: &str, key_ops: &[&str], rng: &mut ChaCha20Rng) -> Result<String> {
     let secret = p521::SecretKey::random(rng);
-    let mut jwk = format_public_key(&secret.public_key())?;
-    jwk.d = Some(Base64UrlUnpadded::encode_string(&secret.to_bytes()));
+    let mut jwk = Zeroizing::new(format_public_key(&secret.public_key())?);
+    jwk.d = Some(Base64UrlUnpadded::encode_string(&Zeroizing::new(
+        secret.to_bytes(),
+    )));
     jwk.alg = Some(alg.into());
     jwk.key_ops = Some(key_ops.iter().map(|op| (*op).into()).collect());
-    serialize_string(&jwk, "generated private key")
+    serialize_string(&*jwk, "generated private key")
 }
 
 fn format_public_key(public: &p521::PublicKey) -> Result<MyJwkEcKey> {
@@ -471,7 +394,7 @@ fn diffie_hellman_public_key(
     Ok(jwk)
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct MyJwkEcKey {
     /// The `crv` parameter which identifies a particular elliptic curve
     /// as defined in RFC 7518 Section 6.2.1.1:
@@ -566,6 +489,68 @@ pub struct MyJwkEcKey {
     pub x5t_s256: Option<String>,
 }
 
+impl std::fmt::Debug for MyJwkEcKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MyJwkEcKey")
+            .field("crv", &self.crv)
+            .field("kty", &self.kty)
+            .field("x", &self.x)
+            .field("y", &self.y)
+            .field("alg", &self.alg)
+            .field("key_ops", &self.key_ops)
+            .field("use", &self.use_)
+            .field("kid", &self.kid)
+            .field("x5u", &self.x5u)
+            .field("x5c", &self.x5c)
+            .field("x5t", &self.x5t)
+            .field("x5t_s256", &self.x5t_s256)
+            .field("d", &self.d.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+impl Zeroize for MyJwkEcKey {
+    fn zeroize(&mut self) {
+        self.d.zeroize();
+    }
+}
+
+fn parse_private_jwk(json: &str) -> std::result::Result<Zeroizing<MyJwkEcKey>, serde_json::Error> {
+    #[derive(serde::Deserialize)]
+    struct Fields {
+        crv: String,
+        x: String,
+        y: String,
+        kty: String,
+        d: Option<Zeroizing<String>>,
+        #[serde(rename = "use")]
+        use_: Option<String>,
+        key_ops: Option<Vec<String>>,
+        alg: Option<String>,
+        kid: Option<String>,
+        x5u: Option<String>,
+        x5c: Option<String>,
+        x5t: Option<String>,
+        x5t_s256: Option<String>,
+    }
+    let mut fields: Fields = serde_json::from_str(json)?;
+    Ok(Zeroizing::new(MyJwkEcKey {
+        crv: fields.crv,
+        x: fields.x,
+        y: fields.y,
+        kty: fields.kty,
+        d: fields.d.as_mut().map(|d| std::mem::take(&mut **d)),
+        use_: fields.use_,
+        key_ops: fields.key_ops,
+        alg: fields.alg,
+        kid: fields.kid,
+        x5u: fields.x5u,
+        x5c: fields.x5c,
+        x5t: fields.x5t,
+        x5t_s256: fields.x5t_s256,
+    }))
+}
+
 impl MyJwkEcKey {
     /// Convert and validate a P-521 JWK. Private conversion requires a scalar
     /// whose public point matches the supplied coordinates.
@@ -595,7 +580,7 @@ impl MyJwkEcKey {
             y: &self.y,
             d: if public { None } else { self.d.as_deref() },
         };
-        let json = serialize_string(&fields, "EC key")?;
+        let json = Zeroizing::new(serialize_string(&fields, "EC key")?);
         let jwk = JwkEcKey::from_str(&json)
             .map_err(|source| Error::key_cause("invalid EC key", source))?;
         if public {
@@ -610,9 +595,21 @@ impl MyJwkEcKey {
     }
 
     pub fn to_public_key(&self) -> MyJwkEcKey {
-        let mut ret = self.clone();
-        ret.d = None;
-        ret
+        Self {
+            crv: self.crv.clone(),
+            x: self.x.clone(),
+            y: self.y.clone(),
+            d: None,
+            kty: self.kty.clone(),
+            use_: self.use_.clone(),
+            key_ops: self.key_ops.clone(),
+            alg: self.alg.clone(),
+            kid: self.kid.clone(),
+            x5u: self.x5u.clone(),
+            x5c: self.x5c.clone(),
+            x5t: self.x5t.clone(),
+            x5t_s256: self.x5t_s256.clone(),
+        }
     }
 
     /// Compute an RFC 7638 thumbprint from the public fields.
@@ -648,7 +645,7 @@ impl MyJwkEcKey {
 mod tests {
     use super::*;
     use elliptic_curve::rand_core::{CryptoRng, RngCore};
-    use std::error::Error as _;
+    use std::{error::Error as _, io};
 
     struct FailingEntropy;
 
@@ -750,115 +747,5 @@ mod tests {
                 "injected serialization failure"
             );
         }
-    }
-
-    struct FailingWriter {
-        file: File,
-        written: bool,
-    }
-
-    impl Write for FailingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self.written {
-                return Err(io::Error::other("injected write failure"));
-            }
-            self.written = true;
-            self.file.write(&bytes[..bytes.len().min(8)])
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// Assures: KEY-STORE-001, ERR-DIAG-001
-    #[test]
-    fn initialization_propagates_create_and_partial_write_failures() {
-        for fail_on in [1, 2] {
-            for fail_create in [true, false] {
-                let dir = tempfile::tempdir().unwrap();
-                let mut opened = 0;
-                let result = TangyLib::init_with_key_writer(
-                    KeySource::LocalDir(dir.path()),
-                    |path| -> io::Result<Box<dyn Write>> {
-                        opened += 1;
-                        if opened != fail_on {
-                            return Ok(Box::new(create_key_file(path)?));
-                        }
-                        if fail_create {
-                            Err(io::Error::new(
-                                io::ErrorKind::PermissionDenied,
-                                "injected create failure",
-                            ))
-                        } else {
-                            Ok(Box::new(FailingWriter {
-                                file: create_key_file(path)?,
-                                written: false,
-                            }))
-                        }
-                    },
-                );
-                let error = result.unwrap_err();
-                assert_eq!(opened, fail_on);
-                assert_eq!(
-                    match &error {
-                        Error::KeyWrite {
-                            path,
-                            operation,
-                            source,
-                        } => {
-                            assert_eq!(path.parent(), Some(dir.path()));
-                            assert_eq!(
-                                *operation,
-                                if fail_create {
-                                    WriteStep::Create
-                                } else {
-                                    WriteStep::Write
-                                }
-                            );
-                            source.kind()
-                        }
-                        _ => panic!("unexpected error: {error:?}"),
-                    },
-                    if fail_create {
-                        io::ErrorKind::PermissionDenied
-                    } else {
-                        io::ErrorKind::Other
-                    }
-                );
-                let snapshot = || {
-                    std::fs::read_dir(dir.path())
-                        .unwrap()
-                        .map(|entry| {
-                            let path = entry.unwrap().path();
-                            let bytes = std::fs::read(&path).unwrap();
-                            (path, bytes)
-                        })
-                        .collect::<std::collections::BTreeMap<_, _>>()
-                };
-                let before = snapshot();
-                assert_eq!(
-                    before.len(),
-                    if fail_create { fail_on - 1 } else { fail_on }
-                );
-                if !before.is_empty() {
-                    assert!(TangyLib::init(KeySource::LocalDir(dir.path())).is_err());
-                    assert_eq!(before, snapshot());
-                }
-            }
-        }
-    }
-
-    /// Assures: KEY-STORE-001
-    #[test]
-    fn key_creation_does_not_overwrite_an_existing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("existing.jwk");
-        std::fs::write(&path, "existing key").unwrap();
-        assert_eq!(
-            create_key_file(&path).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
-        );
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "existing key");
     }
 }

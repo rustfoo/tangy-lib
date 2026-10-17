@@ -38,7 +38,7 @@ fn incomplete_key_sets_identify_the_missing_roles() {
 /// Assures: ERR-DIAG-001
 #[test]
 fn invalid_stored_keys_include_their_origin_and_safe_source_chain() {
-    let error = TangyLib::init(KeySource::Vector(&vec![SIGNING, RECOVERY, "{"])).unwrap_err();
+    let error = TangyLib::init(KeySource::Vector(&[SIGNING, RECOVERY, "{"])).unwrap_err();
     assert!(matches!(
         &error,
         Error::InvalidStoredKey {
@@ -76,7 +76,7 @@ fn stored_policy_and_crypto_errors_retain_validation_causes() {
     let mut key: Value = serde_json::from_str(SIGNING).unwrap();
     key["key_ops"] = json!(["verify"]);
     let invalid = key.to_string();
-    let error = TangyLib::init(KeySource::Vector(&vec![RECOVERY, &invalid])).unwrap_err();
+    let error = TangyLib::init(KeySource::Vector(&[RECOVERY, &invalid])).unwrap_err();
     assert!(matches!(
         &error,
         Error::InvalidStoredKey {
@@ -95,7 +95,7 @@ fn stored_policy_and_crypto_errors_retain_validation_causes() {
     key["key_ops"] = json!(["sign", "verify"]);
     key["x"] = json!("%%%");
     let invalid = key.to_string();
-    let error = TangyLib::init(KeySource::Vector(&vec![RECOVERY, &invalid])).unwrap_err();
+    let error = TangyLib::init(KeySource::Vector(&[RECOVERY, &invalid])).unwrap_err();
     let Error::InvalidStoredKey { source, .. } = &error else {
         panic!("unexpected error: {error:?}");
     };
@@ -130,7 +130,7 @@ fn stored_policy_errors_identify_every_required_operation() {
         let mut key: Value = serde_json::from_str(fixture).unwrap();
         key["key_ops"] = operations;
         let invalid = key.to_string();
-        let error = TangyLib::init(KeySource::Vector(&vec![&invalid])).unwrap_err();
+        let error = TangyLib::init(KeySource::Vector(&[invalid.as_str()])).unwrap_err();
         let Error::InvalidStoredKey { location, source } = &error else {
             panic!("unexpected error: {error:?}");
         };
@@ -152,6 +152,12 @@ fn operation_displays_preserve_protocol_and_diagnostic_wording() {
         (KeyOperation::DeriveKey.to_string(), "deriveKey"),
         (WriteStep::Create.to_string(), "create"),
         (WriteStep::Write.to_string(), "write"),
+        (WriteStep::Synchronize.to_string(), "synchronize"),
+        (WriteStep::Publish.to_string(), "publish"),
+        (
+            KeyLocation::RotatedInput(2).to_string(),
+            "rotated input index 2",
+        ),
         (RandomPurpose::KeyGeneration.to_string(), "key generation"),
         (
             RandomPurpose::AdvertisementSigning.to_string(),
@@ -354,7 +360,7 @@ fn error_formatting_and_sources_do_not_echo_private_json_values() {
     key["key_ops"] = json!(marker);
     let json = key.to_string();
     for error in [
-        TangyLib::init(KeySource::Vector(&vec![&json, RECOVERY])).unwrap_err(),
+        TangyLib::init(KeySource::Vector(&[&json, RECOVERY])).unwrap_err(),
         library.rec(&thumbprint(RECOVERY), &json).unwrap_err(),
     ] {
         let messages = diagnostics(&error);

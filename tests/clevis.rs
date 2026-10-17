@@ -3,7 +3,8 @@ mod common;
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    process::Command,
+    path::PathBuf,
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -13,7 +14,7 @@ use std::{
 };
 
 use common::*;
-use tangy_lib::TangyLib;
+use tangy_lib::{KeySource, TangyLib};
 
 // A bounded, loopback-only adapter for the external client test, not a server API.
 struct Server {
@@ -24,6 +25,14 @@ struct Server {
 
 impl Server {
     fn start(lib: TangyLib) -> Self {
+        Self::start_with_rotation(lib, None)
+    }
+
+    fn start_with_rotation(
+        mut lib: TangyLib,
+        rotation: Option<(PathBuf, PathBuf, TangyLib)>,
+    ) -> Self {
+        let mut rotation = rotation;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -32,6 +41,16 @@ impl Server {
         let worker = thread::spawn(move || {
             let mut paths = Vec::new();
             while !stopping.load(Ordering::SeqCst) {
+                if rotation
+                    .as_ref()
+                    .is_some_and(|(request, _, _)| request.exists())
+                {
+                    let (_, ready, rotated) = rotation
+                        .take()
+                        .ok_or_else(|| io::Error::other("missing test rotation"))?;
+                    lib = rotated;
+                    std::fs::write(ready, "rotated")?;
+                }
                 match listener.accept() {
                     Ok((stream, _)) => paths.push(serve(&lib, stream)?),
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -147,4 +166,52 @@ fn clevis_encrypts_and_recovers_using_library_endpoints() {
             2
         );
     }
+}
+
+/// Assures: INTEROP-ROTATE-001
+#[test]
+fn clevis_recovers_old_bindings_enrolls_with_current_thumbprint_and_jose_verifies_old_signer() {
+    let generated = tangy_lib::create_new_key_set().unwrap();
+    let active: Vec<_> = generated.iter().map(String::as_str).collect();
+    let new_recovery = thumbprint(&generated[1]);
+    let rotated = TangyLib::init(KeySource::KeySets {
+        active: &active,
+        rotated: &[SIGNING, RECOVERY],
+    })
+    .unwrap();
+    let signals = tempfile::tempdir().unwrap();
+    let request = signals.path().join("rotate");
+    let ready = signals.path().join("ready");
+    let server = Server::start_with_rotation(
+        library(&[SIGNING, RECOVERY]),
+        Some((request.clone(), ready.clone(), rotated)),
+    );
+    let selected = thumbprint(SIGNING);
+    let output = Command::new("python3")
+        .arg("scripts/clevis-rotation.py")
+        .arg(&server.url)
+        .arg(&selected)
+        .arg(request)
+        .arg(ready)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("Python 3 required for interoperability");
+    assert!(
+        output.status.success(),
+        "Clevis rotation failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let paths = server.finish();
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|p| **p == format!("/adv/{selected}"))
+            .count(),
+        4
+    );
+    assert!(paths.contains(&format!("/adv/{}", thumbprint(&generated[0]))));
+    assert!(paths.contains(&format!("/rec/{}", thumbprint(RECOVERY))));
+    assert!(paths.contains(&format!("/rec/{new_recovery}")));
 }

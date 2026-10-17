@@ -114,6 +114,10 @@ def main():
             errors.append(f"registry: malformed assertion ID {assertion['id']}")
         if assertion["id"] in known:
             errors.append(f"registry: duplicate assertion ID {assertion['id']}")
+        required = assertion.get("required_reports", [])
+        if (not isinstance(required, list) or any(not isinstance(label, str) or not label for label in required)
+                or len(set(required)) != len(required)):
+            errors.append(f"registry: invalid required_reports for {assertion['id']}")
         known[assertion["id"]] = assertion
 
     runs = {}
@@ -121,6 +125,8 @@ def main():
         label, _, path = spec.partition("=")
         if not path:
             parser.error(f"--junit expects LABEL=PATH, got {spec}")
+        if label in runs:
+            parser.error(f"duplicate JUnit report label {label}")
         runs[label] = junit_results(label, Path(path))
 
     tags = tagged_tests(crate)
@@ -134,6 +140,8 @@ def main():
             errors.append(f"{binary}::{name} matches several reported tests")
         if any("failed" in found for found in ran.values()):
             errors.append(f"{binary}::{name} failed")
+        if any("skipped" in found for found in ran.values()):
+            errors.append(f"{binary}::{name} was skipped")
         record = {
             "test": f"{binary}::{name}",
             "runs": {label: found[0] for label, found in ran.items()},
@@ -151,8 +159,18 @@ def main():
         supported = passing >= assertion["min_evidence"]
         if not supported:
             errors.append(f"{id}: {passing} of {assertion['min_evidence']} required passing tests")
-        report.append({**assertion, "passing": passing, "supported": supported,
-                       "evidence": evidence[id]})
+        by_report = {}
+        for label in assertion.get("required_reports", []):
+            count = sum(record["runs"].get(label) == "passed" for record in evidence[id])
+            by_report[label] = count
+            if label not in runs:
+                errors.append(f"{id}: required report {label} is missing")
+                supported = False
+            elif count < assertion["min_evidence"]:
+                errors.append(f"{id}: {label} has {count} of {assertion['min_evidence']} required passing tests")
+                supported = False
+        report.append({**assertion, "passing": passing, "passing_by_report": by_report,
+                       "supported": supported, "evidence": evidence[id]})
         print(f"{'ok ' if supported else 'GAP'} {id:<16} {passing}/{assertion['min_evidence']}"
               f"  {assertion['statement']}")
 
