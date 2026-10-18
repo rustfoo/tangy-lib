@@ -85,7 +85,22 @@ fn generate() -> tangy_lib::Result<Vec<String>> {
 
 On success this returns two private JWK strings: one ES512 signing key and one ECMR recovery key. It does not write files. Generation and advertisement signing obtain an OS seed through a fallible call, then use a ChaCha20 cryptographic generator with P-521. An entropy failure returns `Error::Randomness`; a signing failure returns `Error::Signing` with the signing key ID.
 
-All fallible public operations use the crate's `Result<T>` alias. `MyJwkEcKey::to_jwk_ec_key(public)` now returns `Result<JwkEcKey>` and validates P-521 key material, including matching public and private values for private conversion. `MyJwkEcKey::thumbprint()` returns `Result<String>`. Use `?` on these helpers and on `create_new_key_set()` when migrating from 0.1.
+All fallible public operations use the crate's `Result<T>` alias. The old
+`MyJwkEcKey::to_jwk_ec_key(public)` helper is replaced by explicit typed conversions:
+
+```rust
+let public = jwk.to_p521_public_key()?; // p521::PublicKey
+let secret = jwk.to_p521_secret_key()?; // p521::SecretKey
+assert_eq!(secret.public_key(), public);
+```
+
+These methods require `kty = "EC"`, `crv = "P-521"`, and unpadded Base64URL fields
+encoding exactly 66 bytes. Private conversion requires a nonzero scalar below the
+curve order whose public point matches `x` and `y`. Public conversion ignores `d`,
+even if it is malformed. `to_public_key()` still returns a public-only JWK;
+`thumbprint()` returns `Result<String>`. Use `?` on fallible helpers and on
+`create_new_key_set()` when migrating from 0.1. The typed conversions expose
+P-521 0.14 key types; callers using those types directly should use the same series.
 
 The public `Error` enum is non-exhaustive, so callers should include a fallback arm when matching it. `InvalidStoredKey` identifies the file path or zero-based active/rotated input index and stores its validation cause as `Box<Error>`; callers can match `source.as_ref()` directly without downcasting. `MissingKeys` identifies absent signing and recovery roles.
 
@@ -175,7 +190,7 @@ signature. This limitation also follows from Tang's active-only payloads and
 
 Private JWK `Debug` output redacts `d`, and library debug output redacts typed
 private keys. Public conversion copies only public fields. Library-owned private
-JSON, parsed scalar strings, conversion strings, scalar encoding buffers and
+JSON, parsed scalar strings, decoded scalar buffers, scalar encoding buffers and
 entropy seeds use zeroizing wrappers. Public field types and generation's
 `Vec<String>` return type stay unchanged. Caller-owned strings, copies, crypto
 implementation internals and allocator/serialization temporaries remain outside
@@ -245,8 +260,11 @@ The extracted tools support the Tang tests; this setup is not a system Clevis
 installation for configuring encrypted disks. Other Linux distributions can use
 their normal package manager as described above.
 
-CI runs the Rust build and tests on Linux and Windows, checks compatibility with
-Rust 1.85.1 on Linux, and runs the Clevis compatibility test in a separate Linux job.
+The minimum supported Rust version is **1.88.0**, declared as `rust-version = "1.88"`
+in `Cargo.toml`. Phase 4 raises the previous tested minimum of 1.85.1 to support
+the current crypto dependency patches. CI runs the Rust build and tests on Linux
+and Windows, checks Rust 1.88.0 on Linux, and runs the Clevis compatibility tests
+in a separate Linux job.
 
 ## Credits
 

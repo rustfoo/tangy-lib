@@ -35,10 +35,7 @@ fn generated_keys_are_persisted_and_stable_across_restart() {
         let key = fixture_key(std::str::from_utf8(bytes).unwrap());
         let id = key.thumbprint().unwrap();
         assert_eq!(file, &format!("{id}.jwk"));
-        key.to_jwk_ec_key(false)
-            .unwrap()
-            .to_secret_key::<p521::NistP521>()
-            .unwrap();
+        key.to_p521_secret_key().unwrap();
         if key.alg.as_deref() == Some("ECMR") {
             recovery_id = Some(id.clone());
         }
@@ -305,6 +302,10 @@ fn windows_generated_keys_inherit_the_secured_directory_acl() {
     let powershell = |script: &str| {
         let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            // Cargo/nextest can inherit PowerShell 7's module paths from CI.
+            // Let Windows PowerShell rebuild its own paths so Set-Acl/Get-Acl
+            // load the compatible Microsoft.PowerShell.Security module.
+            .env_remove("PSModulePath")
             .env("TANGY_ACL_TEST_DIR", dir.path())
             .output()
             .unwrap();

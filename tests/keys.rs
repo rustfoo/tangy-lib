@@ -2,8 +2,89 @@ mod common;
 
 use base64ct::{Base64UrlUnpadded, Encoding};
 use common::*;
+use p521::elliptic_curve::sec1::ToSec1Point;
 use serde_json::{json, Value};
 use tangy_lib::{create_new_key_set, KeySource, MyJwkEcKey, TangyLib};
+
+/// Assures: KEY-VALID-001
+#[test]
+fn typed_conversion_rejects_invalid_field_encodings_and_lengths() {
+    for field in ["x", "y", "d"] {
+        for encoded in [
+            String::new(),
+            "%%%".into(),
+            "+".repeat(88),
+            "/".repeat(88),
+            format!("{}=", "A".repeat(88)),
+            Base64UrlUnpadded::encode_string(&[1; 65]),
+            Base64UrlUnpadded::encode_string(&[1; 67]),
+        ] {
+            let mut value: Value = serde_json::from_str(SIGNING).unwrap();
+            value[field] = json!(encoded);
+            let key = fixture_key(&value.to_string());
+            assert!(matches!(
+                key.to_p521_secret_key(),
+                Err(tangy_lib::Error::InvalidKey { .. })
+            ));
+            if field == "d" {
+                assert_eq!(
+                    key.to_p521_public_key().unwrap(),
+                    fixture_key(SIGNING).to_p521_public_key().unwrap()
+                );
+            } else {
+                assert!(matches!(
+                    key.to_p521_public_key(),
+                    Err(tangy_lib::Error::InvalidKey { .. })
+                ));
+            }
+        }
+    }
+}
+
+/// Assures: KEY-VALID-001
+#[test]
+fn typed_conversion_checks_scalar_boundaries_and_public_points() {
+    // SEC 2's P-521 group order, encoded as exactly 66 big-endian bytes.
+    let order_hex = "01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409";
+    let order: Vec<u8> = (0..order_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&order_hex[i..i + 2], 16).unwrap())
+        .collect();
+    assert_eq!(order.len(), 66);
+    for bytes in [vec![0; 66], order.clone(), vec![0xff; 66]] {
+        let mut key = fixture_key(SIGNING);
+        key.d = Some(Base64UrlUnpadded::encode_string(&bytes));
+        assert!(matches!(
+            key.to_p521_secret_key(),
+            Err(tangy_lib::Error::InvalidKey { .. })
+        ));
+    }
+    let mut one = vec![0; 66];
+    one[65] = 1;
+    let mut largest = order;
+    largest[65] -= 1;
+    for bytes in [one, largest] {
+        let secret = p521::SecretKey::from_slice(&bytes).unwrap();
+        let point = secret.public_key().to_sec1_point(false);
+        let mut key = fixture_key(SIGNING);
+        key.x = Base64UrlUnpadded::encode_string(point.x().unwrap());
+        key.y = Base64UrlUnpadded::encode_string(point.y().unwrap());
+        key.d = Some(Base64UrlUnpadded::encode_string(&bytes));
+        assert_eq!(
+            key.to_p521_secret_key().unwrap().to_bytes(),
+            secret.to_bytes()
+        );
+    }
+    for bytes in [[0; 66], [0xff; 66]] {
+        let mut key = fixture_key(SIGNING);
+        key.x = Base64UrlUnpadded::encode_string(&bytes);
+        key.y = Base64UrlUnpadded::encode_string(&bytes);
+        assert!(matches!(
+            key.to_p521_public_key(),
+            Err(tangy_lib::Error::InvalidKey { .. })
+        ));
+    }
+}
 
 /// Assures: KEY-ID-001
 #[test]
@@ -47,20 +128,9 @@ fn generated_keys_and_serialization_round_trips_are_usable() {
             serde_json::to_value(&key).unwrap(),
             serde_json::to_value(&round_trip).unwrap()
         );
-        let secret = round_trip
-            .to_jwk_ec_key(false)
-            .unwrap()
-            .to_secret_key::<p521::NistP521>()
-            .unwrap();
+        let secret = round_trip.to_p521_secret_key().unwrap();
         let public = key.to_public_key();
-        assert_eq!(
-            public
-                .to_jwk_ec_key(true)
-                .unwrap()
-                .to_public_key::<p521::NistP521>()
-                .unwrap(),
-            secret.public_key()
-        );
+        assert_eq!(public.to_p521_public_key().unwrap(), secret.public_key());
         let public_json = serde_json::to_value(&public).unwrap();
         assert_public(&public_json);
         assert_eq!(

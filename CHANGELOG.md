@@ -65,6 +65,20 @@ This changelog follows the Keep a Changelog format.
 
 ### Changed
 
+- **Breaking:** replaced `MyJwkEcKey::to_jwk_ec_key(bool)` with
+  `to_p521_public_key() -> Result<p521::PublicKey>` and
+  `to_p521_secret_key() -> Result<p521::SecretKey>`. Conversion validates exact
+  66-byte unpadded Base64URL fields, public points, scalar bounds, and matching
+  private/public components without serializing private JSON. Public conversion
+  ignores `d`; the existing public JWK projection remains `to_public_key()`.
+- Upgraded to P-521 0.14, elliptic-curve 0.14.1, ECDSA 0.17, SHA-2 0.11,
+  and rand_chacha/rand_core 0.10, removing the `generic-array` 0.14 dependency
+  paths. Crypto imports use P-521 re-exports. Fallible OS entropy now comes from
+  `getrandom` 0.4; ES512 signing and ECMR full-point recovery retain their semantics.
+- Raised the minimum supported Rust version from the previously tested 1.85.1
+  to 1.88.0, declared it in the manifest, and updated the MSRV CI job. This permits
+  the current SHA-2 0.11.1 and ctutils 0.4.3 patches without compatibility pins.
+
 - **Breaking:** `KeySource::Vector` takes `&[&str]` instead of `&Vec<&str>`.
   Vector keys remain active; explicit `KeySets` inputs can mark rotated keys.
 - Only active public keys are advertised and active signing keys sign by
@@ -83,7 +97,7 @@ This changelog follows the Keep a Changelog format.
   `Publish`.
 
 - **Breaking:** `init`, `adv`, `adv_internal`, and `rec` return the crate's
-  typed `Result`. `create_new_key_set`, `MyJwkEcKey::to_jwk_ec_key`, and
+  typed `Result`. `create_new_key_set`, the typed P-521 conversion helpers, and
   `MyJwkEcKey::thumbprint` now return typed results; callers must use `?` or
   otherwise handle failures. Conversion validates P-521 public/private material.
 - Initialization retains validated typed signing and recovery keys alongside
@@ -104,9 +118,7 @@ This changelog follows the Keep a Changelog format.
   matching. Validation reasons and `Serialization.context` remain diagnostic
   strings whose wording is not a stable matching API.
 - Signing keys are constructed from validated secret keys without serializing
-  and reparsing the scalar. A direct dependency on the already-resolved `ecdsa`
-  0.16.9 series enables conversion into the existing P-521 0.13 wrapper; resolved
-  crypto dependency versions and the signing implementation are unchanged.
+  and reparsing the scalar, using the P-521 signing-key type directly.
 - Initialization validates stored keys as P-521 private keys with matching
   public coordinates. ES512 signing keys must permit both `sign` and `verify`;
   ECMR recovery keys must permit `deriveKey`. Unsupported algorithms and missing
@@ -131,6 +143,9 @@ This changelog follows the Keep a Changelog format.
 
 ### Fixed
 
+- Windows ACL tests clear the child Windows PowerShell process's inherited
+  `PSModulePath`, preventing incompatible PowerShell 7 modules from breaking
+  `Set-Acl` and `Get-Acl` when Cargo runs under PowerShell 7 in CI.
 - Removed production unwrap/expect calls and replaced fixed-size Base64 buffers
   with allocating encoding helpers. Removed indirect use of infallible OS
   entropy and JWK string serialization APIs.

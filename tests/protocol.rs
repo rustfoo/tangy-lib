@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use base64ct::{Base64UrlUnpadded, Encoding};
 use common::*;
 use p521::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p521::elliptic_curve::sec1::ToSec1Point;
 use serde_json::{json, Value};
 use tangy_lib::MyJwkEcKey;
 
@@ -37,11 +38,7 @@ fn verified_signers(adv: &Value) -> Vec<Option<String>> {
                 .iter()
                 .filter(|key| key.alg.as_deref() == Some("ES512"))
                 .filter(|key| {
-                    let point = key
-                        .to_jwk_ec_key(true)
-                        .unwrap()
-                        .to_encoded_point::<p521::NistP521>()
-                        .unwrap();
+                    let point = key.to_p521_public_key().unwrap().to_sec1_point(false);
                     VerifyingKey::from_sec1_bytes(point.as_bytes())
                         .unwrap()
                         .verify(input.as_bytes(), &signature)
@@ -151,11 +148,7 @@ fn recovery_matches_independent_vectors() {
         let response: Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(response, vector["response"]);
         assert_public(&response);
-        fixture_key(&wire)
-            .to_jwk_ec_key(true)
-            .unwrap()
-            .to_public_key::<p521::NistP521>()
-            .unwrap();
+        fixture_key(&wire).to_p521_public_key().unwrap();
     }
 }
 
@@ -163,25 +156,23 @@ fn recovery_matches_independent_vectors() {
 #[test]
 fn blinded_client_recovers_its_original_shared_point() {
     let lib = library(&[SIGNING, RECOVERY]);
-    let server = fixture_key(RECOVERY)
-        .to_jwk_ec_key(true)
-        .unwrap()
-        .to_public_key::<p521::NistP521>()
-        .unwrap();
+    let server = fixture_key(RECOVERY).to_p521_public_key().unwrap();
     // Use fixed valid scalars without depending on the server's private key.
     let client = p521::SecretKey::from_slice(&[7; 32]).unwrap();
     let blinder = p521::SecretKey::from_slice(&[11; 32]).unwrap();
     let blinded = p521::ProjectivePoint::from(*client.public_key().as_affine())
         + p521::ProjectivePoint::from(*blinder.public_key().as_affine());
-    let request = p521::PublicKey::from_affine(blinded.to_affine())
+    let point = p521::PublicKey::from_affine(blinded.to_affine())
         .unwrap()
-        .to_jwk_string();
+        .to_sec1_point(false);
+    let request = json!({
+        "kty": "EC", "crv": "P-521",
+        "x": Base64UrlUnpadded::encode_string(point.x().unwrap()),
+        "y": Base64UrlUnpadded::encode_string(point.y().unwrap()),
+    })
+    .to_string();
     let response = lib.rec(&thumbprint(RECOVERY), &request).unwrap();
-    let response = fixture_key(&response)
-        .to_jwk_ec_key(true)
-        .unwrap()
-        .to_public_key::<p521::NistP521>()
-        .unwrap();
+    let response = fixture_key(&response).to_p521_public_key().unwrap();
     let server_point = p521::ProjectivePoint::from(*server.as_affine());
     let unblinded = p521::ProjectivePoint::from(*response.as_affine())
         - server_point * blinder.to_nonzero_scalar().as_ref();

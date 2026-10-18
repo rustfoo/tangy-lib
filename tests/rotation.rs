@@ -4,6 +4,7 @@ use std::{collections::BTreeSet, fs};
 
 use common::*;
 use p521::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p521::elliptic_curve::sec1::ToSec1Point;
 use serde_json::{json, Value};
 use tangy_lib::{Error, KeyLocation, KeySource, TangyLib};
 
@@ -27,10 +28,9 @@ fn signers(adv: &Value, candidates: &[&str]) -> BTreeSet<String> {
             .iter()
             .filter(|json| {
                 let point = fixture_key(json)
-                    .to_jwk_ec_key(true)
+                    .to_p521_public_key()
                     .unwrap()
-                    .to_encoded_point::<p521::NistP521>()
-                    .unwrap();
+                    .to_sec1_point(false);
                 VerifyingKey::from_sec1_bytes(point.as_bytes())
                     .unwrap()
                     .verify(input.as_bytes(), &signature_bytes)

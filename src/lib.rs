@@ -28,15 +28,11 @@ pub use error::{
     Algorithm, Error, JsonError, KeyLocation, KeyOperation, RandomPurpose, Result, WriteStep,
 };
 
-use std::{collections::BTreeMap, path::Path, str::FromStr};
+use std::{collections::BTreeMap, path::Path};
 
 use base64ct::{Base64UrlUnpadded, Encoding};
-use elliptic_curve::{
-    rand_core::{CryptoRngCore, OsRng, SeedableRng},
-    sec1::ToEncodedPoint,
-    JwkEcKey,
-};
 use p521::ecdsa::{self, signature::RandomizedSigner, SigningKey};
+use p521::elliptic_curve::{self, rand_core::SeedableRng, sec1::ToSec1Point, Generate};
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use sha2::Digest;
@@ -117,10 +113,14 @@ impl TangyLib {
     }
 
     pub fn adv_internal(&self, skid: Option<&str>) -> Result<String> {
-        self.adv_with_rng(skid, &mut OsRng)
+        self.adv_with_rng(skid, &mut getrandom::fill)
     }
 
-    fn adv_with_rng(&self, skid: Option<&str>, entropy: &mut impl CryptoRngCore) -> Result<String> {
+    fn adv_with_rng<E: std::error::Error + Send + Sync + 'static>(
+        &self,
+        skid: Option<&str>,
+        entropy: &mut impl FnMut(&mut [u8]) -> std::result::Result<(), E>,
+    ) -> Result<String> {
         #[derive(Serialize)]
         struct Signature {
             protected: String,
@@ -235,11 +235,7 @@ impl TangyLib {
             return Err(Error::request("key operations must permit deriveKey"));
         }
         let request_key = request_key
-            .to_jwk_ec_key(true)
-            .and_then(|jwk| {
-                jwk.to_public_key::<p521::NistP521>()
-                    .map_err(|source| Error::key_cause("invalid public point", source))
-            })
+            .to_p521_public_key()
             .map_err(|source| Error::request_cause("invalid public key", source))?;
         let response =
             diffie_hellman_public_key(&secret.to_nonzero_scalar(), request_key.as_affine())?;
@@ -250,10 +246,12 @@ impl TangyLib {
 /// Generate private signing and recovery JWKs without writing files.
 /// OS entropy and serialization failures are returned to the caller.
 pub fn create_new_key_set() -> Result<Vec<String>> {
-    create_new_key_set_with_rng(&mut OsRng)
+    create_new_key_set_with_rng(&mut getrandom::fill)
 }
 
-fn create_new_key_set_with_rng(entropy: &mut impl CryptoRngCore) -> Result<Vec<String>> {
+fn create_new_key_set_with_rng<E: std::error::Error + Send + Sync + 'static>(
+    entropy: &mut impl FnMut(&mut [u8]) -> std::result::Result<(), E>,
+) -> Result<Vec<String>> {
     let mut rng = crypto_rng(entropy, RandomPurpose::KeyGeneration)?;
     let mut signing = Zeroizing::new(create_new_jwk("ES512", &["sign", "verify"], &mut rng)?);
     let mut recovery = Zeroizing::new(create_new_jwk("ECMR", &["deriveKey"], &mut rng)?);
@@ -263,17 +261,18 @@ fn create_new_key_set_with_rng(entropy: &mut impl CryptoRngCore) -> Result<Vec<S
     ])
 }
 
-// P-521 0.13 uses infallible fill_bytes internally, even in try_sign. Seed a
-// CSPRNG through a fallible call before entering those APIs. ChaCha20's fills
-// cannot fail and every operation receives a fresh OS seed.
-fn crypto_rng(entropy: &mut impl CryptoRngCore, operation: RandomPurpose) -> Result<ChaCha20Rng> {
+// Seed a fresh CSPRNG through a fallible OS call before crypto operations.
+// ChaCha20 fills cannot fail; entropy failures retain their original source and
+// operation context, including before randomized signing.
+fn crypto_rng<E: std::error::Error + Send + Sync + 'static>(
+    entropy: &mut impl FnMut(&mut [u8]) -> std::result::Result<(), E>,
+    operation: RandomPurpose,
+) -> Result<ChaCha20Rng> {
     let mut seed = Zeroizing::new([0u8; 32]);
-    entropy
-        .try_fill_bytes(seed.as_mut())
-        .map_err(|source| Error::Randomness {
-            operation,
-            source: Box::new(source),
-        })?;
+    entropy(seed.as_mut()).map_err(|source| Error::Randomness {
+        operation,
+        source: Box::new(source),
+    })?;
     Ok(ChaCha20Rng::from_seed(*seed))
 }
 
@@ -319,14 +318,9 @@ fn validate_stored_key(jwk: Zeroizing<MyJwkEcKey>, kid: &str) -> Result<StoredKe
         Some("ECMR") => require_operation(&jwk, kid, Algorithm::Ecmr, KeyOperation::DeriveKey)?,
         _ => return Err(Error::invalid_key("algorithm must be ES512 or ECMR")),
     }
-    let secret = jwk
-        .to_jwk_ec_key(false)?
-        .to_secret_key::<p521::NistP521>()
-        .map_err(|source| Error::key_cause("invalid private key", source))?;
+    let secret = jwk.to_p521_secret_key()?;
     let material = if jwk.alg.as_deref() == Some("ES512") {
-        // P-521 0.13 wraps the generic ECDSA key; construct it without a
-        // serialized scalar copy or fallible reparsing.
-        KeyMaterial::Signing(::ecdsa::SigningKey::<p521::NistP521>::from(&secret).into())
+        KeyMaterial::Signing(SigningKey::from(&secret))
     } else {
         KeyMaterial::Recovery(secret)
     };
@@ -342,7 +336,7 @@ fn validate_stored_key(jwk: Zeroizing<MyJwkEcKey>, kid: &str) -> Result<StoredKe
 }
 
 fn create_new_jwk(alg: &str, key_ops: &[&str], rng: &mut ChaCha20Rng) -> Result<String> {
-    let secret = p521::SecretKey::random(rng);
+    let secret = p521::SecretKey::generate_from_rng(rng);
     let mut jwk = Zeroizing::new(format_public_key(&secret.public_key())?);
     jwk.d = Some(Base64UrlUnpadded::encode_string(&Zeroizing::new(
         secret.to_bytes(),
@@ -353,7 +347,7 @@ fn create_new_jwk(alg: &str, key_ops: &[&str], rng: &mut ChaCha20Rng) -> Result<
 }
 
 fn format_public_key(public: &p521::PublicKey) -> Result<MyJwkEcKey> {
-    let point = public.to_encoded_point(false);
+    let point = public.to_sec1_point(false);
     let x = point
         .x()
         .ok_or_else(|| Error::invalid_key("public point has no x coordinate"))?;
@@ -551,47 +545,71 @@ fn parse_private_jwk(json: &str) -> std::result::Result<Zeroizing<MyJwkEcKey>, s
     }))
 }
 
+// Fixed-size decoding bounds allocations and zeroizes partial private output
+// on every failure path. Never attach input values to diagnostics.
+fn decode_jwk_field(value: &str) -> Result<Zeroizing<[u8; 66]>> {
+    let mut bytes = Zeroizing::new([0u8; 66]);
+    let decoded = Base64UrlUnpadded::decode(value, bytes.as_mut())
+        .map_err(|source| Error::key_cause("invalid JWK field encoding", source))?;
+    if decoded.len() != 66 {
+        return Err(Error::invalid_key(
+            "JWK fields must encode exactly 66 bytes",
+        ));
+    }
+    Ok(bytes)
+}
+
 impl MyJwkEcKey {
-    /// Convert and validate a P-521 JWK. Private conversion requires a scalar
-    /// whose public point matches the supplied coordinates.
-    pub fn to_jwk_ec_key(&self, public: bool) -> Result<JwkEcKey> {
+    /// Validate and convert the public coordinates of a P-521 JWK.
+    /// Coordinates must be unpadded Base64URL encoding exactly 66 bytes each.
+    /// The private scalar, if present, is ignored.
+    pub fn to_p521_public_key(&self) -> Result<p521::PublicKey> {
         if self.kty != "EC" {
             return Err(Error::invalid_key("key type must be EC"));
         }
         if self.crv != "P-521" {
             return Err(Error::invalid_key("curve must be P-521"));
         }
-        if !public && self.d.is_none() {
-            return Err(Error::invalid_key("private scalar is missing"));
+        let x = decode_jwk_field(&self.x)?;
+        let y = decode_jwk_field(&self.y)?;
+        let encoded: Vec<u8> = std::iter::once(4)
+            .chain(x.iter().copied())
+            .chain(y.iter().copied())
+            .collect();
+        p521::PublicKey::from_sec1_bytes(&encoded)
+            .map_err(|source| Error::key_cause("invalid public point", source))
+    }
+
+    /// Validate and convert a P-521 private JWK, including its public point.
+    /// The private scalar must encode exactly 66 bytes in unpadded Base64URL,
+    /// be nonzero and below the curve order, and match the public coordinates.
+    ///
+    /// ```
+    /// use tangy_lib::{create_new_key_set, MyJwkEcKey};
+    ///
+    /// for json in create_new_key_set()? {
+    ///     let jwk: MyJwkEcKey = serde_json::from_str(&json)?;
+    ///     let secret = jwk.to_p521_secret_key()?;
+    ///     let public = jwk.to_p521_public_key()?;
+    ///     assert_eq!(secret.public_key(), public);
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn to_p521_secret_key(&self) -> Result<p521::SecretKey> {
+        let public = self.to_p521_public_key()?;
+        let d = self
+            .d
+            .as_deref()
+            .ok_or_else(|| Error::invalid_key("private scalar is missing"))?;
+        let bytes = decode_jwk_field(d)?;
+        let secret = p521::SecretKey::from_slice(bytes.as_ref())
+            .map_err(|source| Error::key_cause("invalid private scalar", source))?;
+        if secret.public_key() != public {
+            return Err(Error::invalid_key(
+                "private scalar does not match public point",
+            ));
         }
-        #[derive(Serialize)]
-        struct Fields<'a> {
-            crv: &'a str,
-            kty: &'a str,
-            x: &'a str,
-            y: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            d: Option<&'a str>,
-        }
-        let fields = Fields {
-            crv: &self.crv,
-            kty: &self.kty,
-            x: &self.x,
-            y: &self.y,
-            d: if public { None } else { self.d.as_deref() },
-        };
-        let json = Zeroizing::new(serialize_string(&fields, "EC key")?);
-        let jwk = JwkEcKey::from_str(&json)
-            .map_err(|source| Error::key_cause("invalid EC key", source))?;
-        if public {
-            jwk.to_public_key::<p521::NistP521>()
-                .map_err(|source| Error::key_cause("invalid public point", source))?;
-        } else {
-            jwk.to_secret_key::<p521::NistP521>().map_err(|source| {
-                Error::key_cause("invalid private scalar or mismatched public point", source)
-            })?;
-        }
-        Ok(jwk)
+        Ok(secret)
     }
 
     pub fn to_public_key(&self) -> MyJwkEcKey {
@@ -644,40 +662,16 @@ impl MyJwkEcKey {
 )]
 mod tests {
     use super::*;
-    use elliptic_curve::rand_core::{CryptoRng, RngCore};
     use std::{error::Error as _, io};
 
-    struct FailingEntropy;
-
-    impl CryptoRng for FailingEntropy {}
-
-    impl RngCore for FailingEntropy {
-        fn next_u32(&mut self) -> u32 {
-            panic!("infallible entropy API called")
-        }
-
-        fn next_u64(&mut self) -> u64 {
-            panic!("infallible entropy API called")
-        }
-
-        fn fill_bytes(&mut self, _dest: &mut [u8]) {
-            panic!("infallible entropy API called")
-        }
-
-        fn try_fill_bytes(
-            &mut self,
-            _dest: &mut [u8],
-        ) -> std::result::Result<(), elliptic_curve::rand_core::Error> {
-            Err(elliptic_curve::rand_core::Error::new(io::Error::other(
-                "injected entropy failure",
-            )))
-        }
+    fn failing_entropy(_dest: &mut [u8]) -> std::result::Result<(), io::Error> {
+        Err(io::Error::other("injected entropy failure"))
     }
 
     /// Assures: KEY-GEN-001
     #[test]
     fn entropy_failures_return_errors_before_key_generation_or_signing() {
-        let error = create_new_key_set_with_rng(&mut FailingEntropy).unwrap_err();
+        let error = create_new_key_set_with_rng(&mut failing_entropy).unwrap_err();
         assert!(matches!(
             error,
             Error::Randomness {
@@ -685,10 +679,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(error
-            .source()
-            .unwrap()
-            .is::<elliptic_curve::rand_core::Error>());
+        assert!(error.source().unwrap().is::<io::Error>());
         assert_eq!(
             error.source().unwrap().to_string(),
             "injected entropy failure"
@@ -703,7 +694,7 @@ mod tests {
             .map(|key| key.map(|key| parse_stored_key(key).unwrap().thumbprint().unwrap()))
         {
             let error = library
-                .adv_with_rng(selection.as_deref(), &mut FailingEntropy)
+                .adv_with_rng(selection.as_deref(), &mut failing_entropy)
                 .unwrap_err();
             assert!(matches!(
                 error,
@@ -712,10 +703,7 @@ mod tests {
                     ..
                 }
             ));
-            assert!(error
-                .source()
-                .unwrap()
-                .is::<elliptic_curve::rand_core::Error>());
+            assert!(error.source().unwrap().is::<io::Error>());
             assert_eq!(
                 error.source().unwrap().to_string(),
                 "injected entropy failure"

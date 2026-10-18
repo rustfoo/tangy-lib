@@ -2,6 +2,7 @@ mod common;
 
 use std::error::Error as StdError;
 
+use base64ct::Encoding;
 use common::*;
 use serde_json::{json, Value};
 use tangy_lib::{
@@ -93,7 +94,7 @@ fn stored_policy_and_crypto_errors_retain_validation_causes() {
     ));
 
     key["key_ops"] = json!(["sign", "verify"]);
-    key["x"] = json!("%%%");
+    key["x"] = json!(base64ct::Base64UrlUnpadded::encode_string(&[0xff; 66]));
     let invalid = key.to_string();
     let error = TangyLib::init(KeySource::Vector(&[RECOVERY, &invalid])).unwrap_err();
     let Error::InvalidStoredKey { source, .. } = &error else {
@@ -101,7 +102,10 @@ fn stored_policy_and_crypto_errors_retain_validation_causes() {
     };
     let validation = source.as_ref();
     assert!(matches!(validation, Error::InvalidKey { .. }));
-    assert!(validation.source().unwrap().is::<elliptic_curve::Error>());
+    assert!(validation
+        .source()
+        .unwrap()
+        .is::<p521::elliptic_curve::Error>());
 }
 
 /// Assures: ERR-DIAG-001
@@ -333,21 +337,24 @@ fn invalid_conversion_helpers_return_typed_errors_without_private_values() {
         let mut key: Value = serde_json::from_str(SIGNING).unwrap();
         key[field] = value;
         let jwk = fixture_key(&key.to_string());
-        let error = jwk.to_jwk_ec_key(false).unwrap_err();
+        let error = jwk.to_p521_secret_key().unwrap_err();
         assert!(matches!(error, Error::InvalidKey { .. }));
         let messages = diagnostics(&error);
         assert!(!messages.contains(&secret));
         assert!(!messages.contains("private-scalar-marker"));
         if field != "d" {
             assert!(matches!(
-                jwk.to_jwk_ec_key(true),
+                jwk.to_p521_public_key(),
                 Err(Error::InvalidKey { .. })
             ));
         }
     }
     let mut public = fixture_key(SIGNING).to_public_key();
     public.d = Some("ignored-private-scalar".into());
-    assert!(public.to_jwk_ec_key(true).unwrap().is_public_key());
+    assert_eq!(
+        public.to_p521_public_key().unwrap(),
+        fixture_key(SIGNING).to_p521_public_key().unwrap()
+    );
 }
 
 /// Assures: KEY-PRIV-001
