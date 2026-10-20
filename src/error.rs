@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use std::{fmt, io, path::PathBuf};
 
 /// A fallible Tang operation.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The algorithm required for an operation on a server key.
+/// A supported server-key algorithm, used for generation and operation requirements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Algorithm {
@@ -51,13 +53,17 @@ impl fmt::Display for KeyOperation {
     }
 }
 
-/// The persistence step that failed. More steps may be added in future releases.
+/// The persistence operation that failed while creating and publishing key files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WriteStep {
+    /// Create a temporary key file and apply its initial permissions.
     Create,
+    /// Write the private key JSON to its temporary file.
     Write,
+    /// Flush file contents or the containing directory to persistent storage.
     Synchronize,
+    /// Rename a complete temporary key file to its final filename.
     Publish,
 }
 

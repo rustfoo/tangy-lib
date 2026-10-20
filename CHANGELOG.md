@@ -8,6 +8,16 @@ This changelog follows the Keep a Changelog format.
 
 ### Added
 
+- A 0.1 to 0.2 migration guide in `MIGRATING.md`, covering typed errors,
+  conversions, key validation, storage, rotation and Rust 1.88.0.
+- SPDX license identifiers on every Rust source file, matching the manifest's
+  `MIT OR Apache-2.0` licensing.
+- Compiled README examples through crate documentation, with warnings treated
+  as errors in CI documentation builds.
+- Daily dependency advisory checks for the library and separate fuzz workspace,
+  weekly Dependabot updates for Cargo and Actions, and bounded seeded
+  AddressSanitizer fuzzing of recovery requests and JWK conversion on pushes,
+  pull requests and a weekly schedule.
 - Tang-compatible active and rotated key sets, `KeySource::KeySets`, and typed
   `DuplicateKey` and `NotAFile` errors.
 - A private key-store module that writes generated keys to temporary files and
@@ -65,6 +75,13 @@ This changelog follows the Keep a Changelog format.
 
 ### Changed
 
+- Separated JWK representation/generation, validated key storage, protocol
+  responses and shared entropy/serialization helpers into private modules,
+  preserving public crate-root imports and the single thumbprint implementation.
+- **Breaking:** removed public `TangyLib::adv_internal`; use `adv(None)` for
+  the cached default advertisement or `adv(Some(kid))` for signer selection.
+- Windows CI runs each native Cargo command in its own step so an intermediate
+  failure cannot be hidden by a later successful PowerShell command.
 - **Breaking:** replaced `MyJwkEcKey::to_jwk_ec_key(bool)` with
   `to_p521_public_key() -> Result<p521::PublicKey>` and
   `to_p521_secret_key() -> Result<p521::SecretKey>`. Conversion validates exact
@@ -96,7 +113,7 @@ This changelog follows the Keep a Changelog format.
 - `KeyLocation` adds `RotatedInput`; `WriteStep` adds `Synchronize` and
   `Publish`.
 
-- **Breaking:** `init`, `adv`, `adv_internal`, and `rec` return the crate's
+- **Breaking:** `init`, `adv`, and `rec` return the crate's
   typed `Result`. `create_new_key_set`, the typed P-521 conversion helpers, and
   `MyJwkEcKey::thumbprint` now return typed results; callers must use `?` or
   otherwise handle failures. Conversion validates P-521 public/private material.

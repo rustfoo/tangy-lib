@@ -1,5 +1,65 @@
-//! Private key loading and first-start generation. Like Tang, one process is
-//! expected to initialize a store; simultaneous first starts are operator error.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! Load, validate and persist the private keys used by a Tang server.
+//!
+//! This module turns [`KeySource`] inputs into a key set for [`TangyLib`]. The
+//! JWK module handles JSON Web Key representation and cryptographic conversion;
+//! this module applies server-key roles, tracks active and rotated keys, rejects
+//! duplicate identities, and manages directory storage.
+//!
+//! [`KeySource::LocalDir`] reads an existing directory in sorted path order for
+//! deterministic diagnostics. Filenames ending in `.jwk` are key entries; a
+//! leading `.` marks a rotated key. Other entries, including temporary `.tmp`
+//! files left by interrupted publication, are ignored. Directory roots and key
+//! paths follow symbolic links, and each key entry must resolve to a regular
+//! file. Enumeration and read failures propagate with their paths.
+//!
+//! [`KeySource::Vector`] treats every supplied key as active, while
+//! [`KeySource::KeySets`] accepts separate active and rotated slices. Both load
+//! directly from strings without generating or writing keys. Every input passes
+//! the same validation: a P-521 private key must match its public coordinates;
+//! signing keys require `ES512` with `sign` and `verify`; recovery keys require
+//! elliptic-curve message recovery (`ECMR`) with `deriveKey`. Repeated public-key
+//! thumbprints fail even for identical copies or keys in different sets.
+//! [`Error::InvalidStoredKey`] identifies the file or input index and retains
+//! its validation cause; [`Error::DuplicateKey`] identifies both origins.
+//!
+//! Validated entries retain typed private keys, public metadata and their active
+//! status. Public metadata omits the private scalar and the `sign` operation;
+//! debug output redacts typed private material. Private key strings read from
+//! disk and parsed scalar temporaries use zeroizing wrappers. The protocol
+//! module uses these entries for advertisements and recovery, and requires both
+//! an active signing key and an active recovery key. Rotated keys remain
+//! available to protocol operations but do not satisfy those active-role checks.
+//!
+//! Directory initialization generates a new pair only when there are no active
+//! or rotated `.jwk` entries. Corrupt, unreadable, incomplete and rotated-only
+//! stores return errors without generating replacements. Loading an existing
+//! valid set requires no writes. Rotation is supplied through filenames or
+//! explicit input sets; this module does not rotate keys automatically.
+//!
+//! For an empty directory, generation, validation and construction of the default
+//! advertisement finish before writing starts. Both private keys are written to
+//! newly created `.tangy-<thumbprint>.tmp` files and synchronized before either is
+//! renamed to `<thumbprint>.jwk`. On Unix, the directory is then synchronized.
+//! Initialization succeeds only after these steps finish. A reported publication
+//! failure triggers best-effort removal of files created by that call and returns
+//! the original error, including its [`WriteStep`].
+//!
+//! Publication makes each key file complete or absent; the pair is not one atomic
+//! transaction. A crash before the first rename leaves ignored temporary files
+//! and permits generation on restart. A crash between renames can leave an
+//! incomplete store that reports [`Error::MissingKeys`] until repaired. Like
+//! Tang, initialization assumes one process controls the store: simultaneous
+//! first starts and concurrent operator edits are unsupported, and no lock is used.
+//!
+//! Unix files are created with restrictive permissions and set to mode `0440`
+//! through their open handles, allowing owner and group reads independently of
+//! the process's file-creation mask. Windows files inherit directory access
+//! control lists, so callers must secure the directory before initialization.
+//! File contents are synchronized on both platforms; Windows omits directory
+//! synchronization and has weaker durability for filename changes after a crash.
+
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -7,12 +67,103 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use p521::ecdsa::SigningKey;
 use zeroize::Zeroizing;
 
 use crate::{
-    create_new_key_set, parse_stored_key, validate_stored_key, Error, KeyLocation, KeySource,
-    Result, StoredKey, TangyLib, WriteStep,
+    create_new_key_set, jwk::parse_private_jwk, Algorithm, Error, JsonError, KeyLocation,
+    KeyOperation, MyJwkEcKey, Result, TangyLib, WriteStep,
 };
+
+// Only public JSON is retained; private material is parsed once at init.
+#[derive(Debug)]
+pub(crate) struct StoredKey {
+    pub(crate) public: MyJwkEcKey,
+    pub(crate) material: KeyMaterial,
+    pub(crate) active: bool,
+}
+
+// Avoid formatting crypto private keys, including through TangyLib's Debug.
+pub(crate) enum KeyMaterial {
+    Signing(SigningKey),
+    Recovery(p521::SecretKey),
+}
+
+impl std::fmt::Debug for KeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Signing(_) => "Signing([REDACTED])",
+            Self::Recovery(_) => "Recovery([REDACTED])",
+        })
+    }
+}
+
+/// Private key inputs. Every set must have active signing and recovery keys.
+#[derive(PartialEq)]
+pub enum KeySource<'a> {
+    /// Load `.jwk` entries; dot-prefixed filenames identify rotated keys.
+    /// A genuinely empty store generates and persists a new pair.
+    /// Only one process may initialize an empty store at a time.
+    LocalDir(&'a Path),
+    /// Load an entirely active slice without generating or writing keys.
+    Vector(&'a [&'a str]),
+    /// Load explicit active and rotated slices without persistence or generation.
+    KeySets {
+        active: &'a [&'a str],
+        rotated: &'a [&'a str],
+    },
+}
+
+fn require_operation(
+    key: &MyJwkEcKey,
+    kid: &str,
+    algorithm: Algorithm,
+    operation: KeyOperation,
+) -> Result<()> {
+    if key.alg.as_deref() != Some(algorithm.as_str())
+        || !key
+            .key_ops
+            .as_ref()
+            .is_some_and(|ops| ops.iter().any(|op| op == operation.as_str()))
+    {
+        return Err(Error::ForbiddenOperation {
+            kid: kid.into(),
+            algorithm,
+            operation,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_stored_key(json: &str) -> Result<Zeroizing<MyJwkEcKey>> {
+    parse_private_jwk(json).map_err(|source| Error::key_cause("invalid JSON", JsonError(source)))
+}
+
+fn validate_stored_key(jwk: Zeroizing<MyJwkEcKey>, kid: &str) -> Result<StoredKey> {
+    match jwk.alg.as_deref() {
+        Some("ES512") => {
+            require_operation(&jwk, kid, Algorithm::Es512, KeyOperation::Sign)?;
+            require_operation(&jwk, kid, Algorithm::Es512, KeyOperation::Verify)?;
+        }
+        Some("ECMR") => require_operation(&jwk, kid, Algorithm::Ecmr, KeyOperation::DeriveKey)?,
+        _ => return Err(Error::invalid_key("algorithm must be ES512 or ECMR")),
+    }
+    let secret = jwk.to_p521_secret_key()?;
+    let material = if jwk.alg.as_deref() == Some("ES512") {
+        KeyMaterial::Signing(SigningKey::from(&secret))
+    } else {
+        KeyMaterial::Recovery(secret)
+    };
+    let mut public = jwk.to_public_key();
+    if let Some(ops) = &mut public.key_ops {
+        ops.retain(|op| op != "sign");
+    }
+    Ok(StoredKey {
+        public,
+        material,
+        active: true,
+    })
+}
 
 type Keys = BTreeMap<String, StoredKey>;
 
