@@ -13,6 +13,12 @@ cargo install cargo-fuzz --locked
 bash scripts/fuzz-smoke.sh
 ```
 
+The script explicitly targets the installed nightly compiler's host platform
+(`x86_64-unknown-linux-gnu` on the Ubuntu CI runner). This avoids
+[cargo-fuzz's default to its own build platform](https://github.com/rust-fuzz/cargo-fuzz/blob/master/src/utils.rs),
+which can select musl when using a prebuilt binary and fail with static-libc
+sanitizer errors or a missing musl standard library.
+
 Each target runs for 30 seconds with AddressSanitizer, at most 4096 input bytes,
 a five-second per-input timeout, and a 1024 MiB RSS limit. CI also sets a job
 timeout. `recovery_request` uses a cached fixture-backed server to fuzz the
@@ -32,11 +38,14 @@ and the working corpora are uploaded for reproduction.
 To reproduce a saved failure, download the CI artifact and run:
 
 ```sh
-cargo +nightly fuzz run recovery_request fuzz/artifacts/recovery_request/<input>
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+    recovery_request fuzz/artifacts/recovery_request/<input>
 ```
 
-Use `jwk_conversion` and its artifact path for that target. A crash becomes a
-normal regression test before fixing the behavior. To run longer, invoke the
+The command above matches the Linux CI target; use your nightly compiler's host
+target on other platforms. Use `jwk_conversion` and its artifact path for that
+target. A crash becomes a normal regression test before fixing the behavior.
+To run longer, invoke the
 target directly with a larger `-max_total_time` using the same seed directories.
 These short runs supplement the protocol and validation tests; they do not
 establish exhaustive coverage or replace platform assurance reports.

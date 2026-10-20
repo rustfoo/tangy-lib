@@ -160,6 +160,9 @@ This changelog follows the Keep a Changelog format.
 
 ### Fixed
 
+- Fuzz runs explicitly use the installed nightly compiler's host target, avoiding
+  musl defaults from prebuilt cargo-fuzz binaries that break AddressSanitizer
+  compilation on GNU/Linux CI runners.
 - Windows ACL tests clear the child Windows PowerShell process's inherited
   `PSModulePath`, preventing incompatible PowerShell 7 modules from breaking
   `Set-Acl` and `Get-Acl` when Cargo runs under PowerShell 7 in CI.
