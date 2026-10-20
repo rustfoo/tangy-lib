@@ -1,0 +1,37 @@
+name: Bounded fuzzing
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Check fuzz formatting
+        run: cargo +nightly fmt --manifest-path fuzz/Cargo.toml --check
+      - name: Run both seeded targets within resource bounds
+        run: bash scripts/fuzz-smoke.sh
+      - name: Upload crash inputs and corpora
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: |
+            fuzz/artifacts
+            fuzz/corpus
+          if-no-files-found: ignore
