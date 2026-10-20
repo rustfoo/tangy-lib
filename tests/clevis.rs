@@ -134,13 +134,23 @@ fn serve(lib: &TangyLib, mut stream: TcpStream) -> io::Result<String> {
     Ok(path)
 }
 
-/// Assures: INTEROP-001
+/// Assures: INTEROP-001, ADV-OPS-001
 #[test]
 fn clevis_encrypts_and_recovers_using_library_endpoints() {
-    for signing in [vec![SIGNING], vec![SIGNING, SECOND_SIGNING]] {
+    // Also accept extra stored permissions without advertising roles the server
+    // does not serve: Clevis requires all advertised verify keys to have signed.
+    let mut extra: serde_json::Value = serde_json::from_str(RECOVERY).unwrap();
+    extra["key_ops"] = serde_json::json!(["deriveKey", "verify", "sign"]);
+    let extra = extra.to_string();
+    for (signing, recovery) in [
+        (vec![SIGNING], RECOVERY),
+        (vec![SIGNING, SECOND_SIGNING], RECOVERY),
+        (vec![SIGNING], extra.as_str()),
+        (vec![SIGNING, SECOND_SIGNING], extra.as_str()),
+    ] {
         let mut keys = signing.clone();
         let selected = thumbprint(signing.last().unwrap());
-        keys.push(RECOVERY);
+        keys.push(recovery);
         let server = Server::start(library(&keys));
         let output = Command::new("python3")
             .arg("scripts/clevis-round-trip.py")

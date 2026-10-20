@@ -10,7 +10,13 @@ cargo check --locked --all-targets --all-features
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+python3 scripts/test-check-assurance.py
+python3 scripts/test-prepare-interop-prefix.py
 ```
+
+To include installer safety results in assurance evidence, run
+`python3 scripts/run-python-tests.py scripts/test-prepare-interop-prefix.py --junit target/installer-junit/junit.xml`.
+CI and the local assurance script collect this report automatically.
 
 The README is included in the crate documentation, so its Rust examples run as
 doctests with `cargo test --locked --doc`.
@@ -52,12 +58,12 @@ The first run needs network access. Run from the repository root:
 
 ```sh
 bash scripts/install-interop-tools.sh
-source /tmp/tangy-lib-interop/env.sh
+source "/tmp/tangy-lib-interop-$UID/env.sh"
 python3 scripts/check-fixtures.py
 cargo test --locked --features interop --test clevis
 ```
 
-The default directory is `/tmp/tangy-lib-interop`; it holds package downloads,
+The default directory is `/tmp/tangy-lib-interop-$UID`; it holds package downloads,
 repository caches, extracted tools, and `env.sh`. Sourcing `env.sh` puts the local
 commands and shared libraries on `PATH` and `LD_LIBRARY_PATH` for the current
 shell. Source it again in each new shell before running the tests. If `/tmp` has
@@ -67,6 +73,12 @@ been cleared, rerun the installer. You can choose another writable directory:
 bash scripts/install-interop-tools.sh /tmp/tangy-interop
 source /tmp/tangy-interop/env.sh
 ```
+
+The installer creates a private prefix and checks existing ownership and write
+permissions before using it. Prefix and parent-directory symlinks, unsafe shared
+parents, writable contents and package links escaping the prefix are rejected.
+Sticky shared parents such as `/tmp` are supported. An unsafe existing prefix
+must be replaced with a new, trusted directory; the installer does not repair it.
 
 The extracted tools support the Tang tests; this setup is not a system Clevis
 installation for configuring encrypted disks. Other Linux distributions can use

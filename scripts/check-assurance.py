@@ -6,7 +6,8 @@ Tests claim assertions with a doc comment directly above them:
     #[test]
     fn ...
 
-Results come from nextest JUnit reports, so only tests that actually ran and
+Python unittest methods use a # Assures: comment before the method/decorators.
+Results come from nextest or run-python-tests.py JUnit reports, so only tests that actually ran and
 passed count as evidence. Usage:
 
     check-assurance.py --junit linux=target/nextest/ci/junit.xml [--junit LABEL=PATH ...]
@@ -14,18 +15,22 @@ passed count as evidence. Usage:
 """
 
 import argparse
+import ast
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tomllib
+import tokenize
 import xml.etree.ElementTree as ET
 
 root = Path(__file__).resolve().parent.parent
 TAG = re.compile(r"^\s*///\s*Assures:\s*(.+?)\s*$")
+PY_TAG = re.compile(r"^\s*#\s*Assures:\s*(.+?)\s*$")
 FN = re.compile(r"^\s*(?:pub\s+)?fn\s+(\w+)")
 ID = re.compile(r"^[A-Z]+(?:-[A-Z]+)*-\d{3}$")
 errors = []
@@ -65,6 +70,42 @@ def tagged_tests(crate):
             if key in tags:
                 errors.append(f"{where}: duplicate test name {name} in {key[0]}")
             tags[key] = ids
+    tags.update(python_tagged_tests())
+    return tags
+
+
+def python_tagged_tests():
+    """Match Python comment tags to unittest methods and their JUnit identities."""
+    tags = {}
+    for path in sorted(root.glob("scripts/test-*.py")):
+        source = path.read_text()
+        lines = source.splitlines()
+        comments = {token.start[0]: match.group(1)
+                    for token in tokenize.generate_tokens(io.StringIO(source).readline)
+                    if token.type == tokenize.COMMENT
+                    and (match := PY_TAG.match(lines[token.start[0] - 1]))}
+        attached = set()
+
+        def visit(body, classes=()):
+            for node in body:
+                if isinstance(node, ast.ClassDef):
+                    visit(node.body, (*classes, node.name))
+                elif isinstance(node, ast.FunctionDef) and classes and node.name.startswith("test_"):
+                    start = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+                    previous = start - 1
+                    while previous > 0 and not lines[previous - 1].strip():
+                        previous -= 1
+                    if previous in comments:
+                        attached.add(previous)
+                        binary = ".".join((path.stem, *classes))
+                        key = (binary, node.name)
+                        if key in tags:
+                            errors.append(f"{path.relative_to(root)}:{previous}: duplicate test {key}")
+                        tags[key] = [id.strip() for id in comments[previous].split(",")]
+
+        visit(ast.parse(source, filename=str(path)).body)
+        for number in comments.keys() - attached:
+            errors.append(f"{path.relative_to(root)}:{number}: Assures tag is not attached to a unittest test method")
     return tags
 
 

@@ -18,8 +18,11 @@ and decisions.
   fn invalid_existing_stores_fail_without_changing_files() { ... }
   ```
 
-- CI runs the suite with `cargo nextest run --profile ci`, which writes JUnit
-  reports. `scripts/check-assurance.py` joins the tags to those reports.
+- Python unittest methods in `scripts/test-*.py` use `# Assures: ID` directly
+  above the method or its decorators. The installer tests produce JUnit with
+  `scripts/run-python-tests.py`.
+- CI collects Rust nextest reports and the Python installer report.
+  `scripts/check-assurance.py` joins the tags to those reports.
 
 ## What the check enforces
 
@@ -29,7 +32,7 @@ The `assurance` CI job fails when:
 - a required report is missing or does not independently meet the minimum;
 - a tagged test failed, was skipped, or is missing from every report;
 - a tag names an assertion that is not in the registry; or
-- a tag is not attached to a `#[test]` function.
+- a tag is not attached to a Rust `#[test]` function or Python unittest method.
 
 Only results from the reports count, so a tag on a test that did not run is
 not evidence. The job prints tests that support no assertion, without failing.
@@ -44,7 +47,7 @@ the record to the commit and workflow that produced it. Verify a downloaded
 record with:
 
 ```sh
-gh attestation verify evidence.json --repo martynp/tangy-lib
+gh attestation verify evidence.json --repo rustfoo/tangy-lib
 ```
 
 ## Running locally
@@ -53,16 +56,26 @@ gh attestation verify evidence.json --repo martynp/tangy-lib
 bash scripts/check-assurance-local.sh /path/to/windows-junit.xml
 ```
 
-This runs Linux tests, fixture verification and both real Clevis tests, then
+This runs Linux tests, installer safety tests, fixture verification and both real Clevis tests, then
 checks them alongside an authentic Windows nextest JUnit report from the same
 revision. Download `junit-windows` from CI or produce it on Windows with
 `cargo nextest run --locked --profile ci`. It writes `target/evidence.json` and
-needs `cargo-nextest`, `clevis` and `jose`. Linux evidence is mandatory for
-`KEY-PERM-001`; Windows evidence is mandatory for `KEY-PERM-WINDOWS-001` and
+needs `cargo-nextest`, `clevis`, `jose` and Python 3.11 or later. Run as a normal
+user: the installer tests check Unix ownership and unreadable directories.
+Linux evidence is mandatory for `KEY-PERM-001` and `KEY-PERM-ROLLBACK-001`;
+Windows evidence is mandatory for `KEY-PERM-WINDOWS-001` and
 both platforms are required for `KEY-PATH-001`. Windows evidence cannot be
 substituted by a renamed Linux report. Full assurance cannot be claimed from
 a Linux-only run. On Fedora, `scripts/install-interop-tools.sh` extracts
 Clevis and JOSE into a local prefix without installing system packages.
+
+`ADV-OPS-001` requires both the Linux protocol regression and a stock Clevis
+run with extra stored key operations. `INTEROP-PREFIX-001` requires all twelve
+installer tests to pass in the separate `installer` report. Produce that report with:
+
+```sh
+python3 scripts/run-python-tests.py scripts/test-prepare-interop-prefix.py --junit target/installer-junit/junit.xml
+```
 
 ## Adding an assertion
 
@@ -72,11 +85,11 @@ fail if the assertion stopped holding; a test that merely runs the code is not
 evidence.
 
 To inspect available evidence without a Windows report, run the checker directly
-with Linux and interop reports; it intentionally exits unsuccessfully for the
+with Linux, interop and installer reports; it intentionally exits unsuccessfully for the
 missing Windows requirements and records those gaps. The evidence record includes
 `passing_by_report` for assertions with platform requirements. The checker counts
 reported tests, not their target platform metadata, so report labels must accurately
 identify the original CI job.
 
 Run `python3 scripts/test-check-assurance.py` to verify per-report minimums,
-missing reports, and failure/skip handling without external tooling.
+missing reports, Python JUnit generation, and failure/skip handling without external tooling.

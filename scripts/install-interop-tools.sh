@@ -5,13 +5,12 @@ set -euo pipefail
 
 if [[ $# -gt 1 || ${1:-} == --help ]]; then
     echo "Usage: bash scripts/install-interop-tools.sh [PREFIX]"
-    echo "Default prefix: /tmp/tangy-lib-interop"
+    echo "Default prefix: /tmp/tangy-lib-interop-$UID"
     exit 0
 fi
 
-prefix=${1:-/tmp/tangy-lib-interop}
-mkdir -p "$prefix"
-prefix=$(cd "$prefix" && pwd -P)
+# Keep new cache files and activation output private to this installer process.
+umask 077
 
 for tool in dnf rpm rpm2cpio cpio curl jq python3 timeout; do
     if ! command -v "$tool" >/dev/null; then
@@ -20,7 +19,8 @@ for tool in dnf rpm rpm2cpio cpio curl jq python3 timeout; do
     fi
 done
 
-mkdir -p "$prefix"/{cache,state,log,packages,root}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+prefix=$(python3 "$script_dir/prepare-interop-prefix.py" "${1:-/tmp/tangy-lib-interop-$UID}")
 arch=$(rpm --eval '%{_arch}')
 dnf_options=(
     --setopt="cachedir=$prefix/cache"
@@ -50,6 +50,9 @@ for package in "$prefix"/packages/*.rpm; do
     rpm --checksig "$package"
     (cd "$prefix/root" && rpm2cpio "$package" | cpio --extract --make-directories --unconditional --quiet)
 done
+
+# Validate extracted entries before writing or sourcing the activation file.
+python3 "$script_dir/prepare-interop-prefix.py" "$prefix" >/dev/null
 
 # Keep both command dispatch and the extracted shared libraries local.
 {

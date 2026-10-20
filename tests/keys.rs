@@ -276,5 +276,5 @@ fn optional_metadata_and_extra_operations_do_not_add_restrictions() {
         .unwrap();
     assert_eq!(key["use"], "arbitrary optional use");
     assert_eq!(key["kid"], "not the thumbprint");
-    assert_eq!(key["key_ops"], json!(["verify", "extra"]));
+    assert_eq!(key["key_ops"], json!(["verify"]));
 }

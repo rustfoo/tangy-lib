@@ -105,6 +105,36 @@ fn advertisements_verify_and_publish_only_public_keys() {
     }
 }
 
+/// Assures: ADV-SIG-001, KEY-VALID-001, ADV-OPS-001
+#[test]
+fn advertised_operations_match_the_roles_served_by_each_key() {
+    let with_extra_operations = |source| {
+        let mut key: Value = serde_json::from_str(source).unwrap();
+        key["key_ops"] = json!(["sign", "verify", "deriveKey", "encrypt", "extra"]);
+        key.to_string()
+    };
+    let signing = with_extra_operations(SIGNING);
+    let recovery = with_extra_operations(RECOVERY);
+    let lib = library(&[&signing, &recovery]);
+    for selection in [None, Some(thumbprint(SIGNING))] {
+        let adv: Value = serde_json::from_str(&lib.adv(selection.as_deref()).unwrap()).unwrap();
+        let body = payload(&adv);
+        for key in body["keys"].as_array().unwrap() {
+            let expected = if key["alg"] == "ES512" {
+                "verify"
+            } else {
+                "deriveKey"
+            };
+            assert_eq!(key["key_ops"], json!([expected]));
+        }
+        // Every key advertised for verification must actually sign, as Clevis requires.
+        assert_eq!(verified_signers(&adv), [Some(thumbprint(SIGNING))]);
+    }
+    assert!(lib
+        .rec(&thumbprint(RECOVERY), &vectors()[0]["request"].to_string())
+        .is_ok());
+}
+
 /// Assures: ADV-SIG-001
 #[test]
 fn advertisement_payload_is_unpadded_for_all_length_remainders() {

@@ -21,6 +21,7 @@ jobs:
       run: |
         cargo fmt --check
         python3 scripts/test-check-assurance.py
+        python3 scripts/run-python-tests.py scripts/test-prepare-interop-prefix.py --junit target/installer-junit/junit.xml
         cargo check --locked --all-targets --all-features
         cargo clippy --locked --all-targets --all-features -- -D warnings
         cargo build --locked --release
@@ -38,6 +39,14 @@ jobs:
       with:
         name: junit-linux
         path: target/nextest/ci/junit.xml
+        if-no-files-found: error
+
+    - name: Upload installer test evidence
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: junit-installer
+        path: target/installer-junit/junit.xml
         if-no-files-found: error
 
   rust-stable-windows:
@@ -120,6 +129,7 @@ jobs:
         python3 scripts/check-assurance.py \
           --junit linux=${{ runner.temp }}/junit/junit-linux/junit.xml \
           --junit interop=${{ runner.temp }}/junit/junit-interop/junit.xml \
+          --junit installer=${{ runner.temp }}/junit/junit-installer/junit.xml \
           --junit windows=${{ runner.temp }}/junit/junit-windows/junit.xml \
           --out ${{ runner.temp }}/evidence.json
     - name: Upload evidence record

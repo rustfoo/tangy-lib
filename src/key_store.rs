@@ -25,7 +25,8 @@
 //! its validation cause; [`Error::DuplicateKey`] identifies both origins.
 //!
 //! Validated entries retain typed private keys, public metadata and their active
-//! status. Public metadata omits the private scalar and the `sign` operation;
+//! status. Advertised operations are `verify` for signing keys and `deriveKey`
+//! for recovery keys, and public metadata omits the private scalar;
 //! debug output redacts typed private material. Private key strings read from
 //! disk and parsed scalar temporaries use zeroizing wrappers. The protocol
 //! module uses these entries for advertisements and recovery, and requires both
@@ -155,9 +156,13 @@ fn validate_stored_key(jwk: Zeroizing<MyJwkEcKey>, kid: &str) -> Result<StoredKe
         KeyMaterial::Recovery(secret)
     };
     let mut public = jwk.to_public_key();
-    if let Some(ops) = &mut public.key_ops {
-        ops.retain(|op| op != "sign");
-    }
+    // Advertise only the role actually served. Clevis selects keys by key_ops,
+    // so an ECMR key claiming verify would otherwise need an ES512 signature.
+    let public_operation = match &material {
+        KeyMaterial::Signing(_) => KeyOperation::Verify,
+        KeyMaterial::Recovery(_) => KeyOperation::DeriveKey,
+    };
+    public.key_ops = Some(vec![public_operation.as_str().into()]);
     Ok(StoredKey {
         public,
         material,
@@ -278,7 +283,15 @@ fn create_key_file(path: &Path) -> io::Result<File> {
     options.mode(0o440);
     let file = options.open(path)?;
     #[cfg(unix)]
-    file.set_permissions(fs::Permissions::from_mode(0o440))?;
+    if let Err(error) = fault_point("permissions")
+        .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o440)))
+    {
+        // write_keys cannot track the path until this function returns a file.
+        // Close the handle before attempting removal and preserve the cause.
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
     Ok(file)
 }
 
@@ -503,12 +516,16 @@ mod tests {
         }
     }
 
-    /// Assures: KEY-PUBLISH-001, KEY-STORE-001, ERR-DIAG-001
+    /// Assures: KEY-PUBLISH-001, KEY-STORE-001, ERR-DIAG-001, KEY-PERM-ROLLBACK-001
     #[test]
     fn injected_failures_remove_created_files_and_retry_cleanly() {
         // Failing the second rename removes the first published key; failing
         // the directory sync removes both.
         for (fault, expected) in [
+            #[cfg(unix)]
+            ("permissions:1", "Create"),
+            #[cfg(unix)]
+            ("permissions:2", "Create"),
             ("write:1", "Write"),
             ("write:2", "Write"),
             ("rename:1", "Publish"),

@@ -24,6 +24,7 @@ done
 reports=$(mktemp -d)
 trap 'rm -rf "$reports"' EXIT
 
+python3 scripts/run-python-tests.py scripts/test-prepare-interop-prefix.py --junit "$reports/installer.xml"
 cargo nextest run --locked --profile ci
 cp target/nextest/ci/junit.xml "$reports/linux.xml"
 python3 scripts/check-fixtures.py
@@ -33,5 +34,6 @@ cp target/nextest/ci/junit.xml "$reports/interop.xml"
 python3 scripts/check-assurance.py \
     --junit linux="$reports/linux.xml" \
     --junit interop="$reports/interop.xml" \
+    --junit installer="$reports/installer.xml" \
     --junit windows="$windows_report" \
     --out target/evidence.json

@@ -45,6 +45,9 @@ as unpadded Base64URL. Signing keys require `alg: "ES512"` plus `sign` and
 missing roles and repeated identities are errors, including identical copies
 across active and rotated sets.
 
+Extra operations in stored metadata are accepted, but advertisements expose only
+`verify` for signing keys and `deriveKey` for recovery keys, matching the roles served.
+
 Recovery requests require a valid P-521 public point. They may omit `alg` and
 `key_ops`; supplied values must allow ECMR and `deriveKey`. Malformed JSON,
 invalid points and incompatible operations return errors. Responses contain

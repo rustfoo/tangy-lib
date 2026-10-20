@@ -31,6 +31,9 @@ This changelog follows the Keep a Changelog format.
   bindings with the current thumbprint.
 - Platform-specific assurance minimums, Windows nextest/JUnit artifacts, and
   checker regression tests. Full local assurance requires Windows evidence.
+- Assurance assertions for advertised key operations, permission-failure rollback
+  and installer prefix safety, with Python unittest tags and JUnit evidence
+  collected alongside the Rust and Clevis reports.
 
 - A typed error API backed by `thiserror` 2: public non-exhaustive `Error` and
   `KeyLocation` enums, a `Result<T>` alias, and a safe `JsonError` wrapper. Errors
@@ -75,6 +78,8 @@ This changelog follows the Keep a Changelog format.
 
 ### Changed
 
+- Disabled unused SHA-2 allocation and algorithm-identifier features; hashing and
+  signature behavior, dependency versions and the resolved package set are unchanged.
 - Separated JWK representation/generation, validated key storage, protocol
   responses and shared entropy/serialization helpers into private modules,
   preserving public crate-root imports and the single thumbprint implementation.
@@ -160,6 +165,15 @@ This changelog follows the Keep a Changelog format.
 
 ### Fixed
 
+- The interoperability installer creates a private per-user prefix, validates
+  ownership and write permissions, rejects symlinked parents/prefixes and links
+  escaping the installation, and checks extracted contents before executing them.
+  Its filesystem safety regressions run in Linux CI.
+- Advertised key operations match the server's actual roles: signing keys expose
+  only `verify`, and recovery keys only `deriveKey`. Extra stored permissions no
+  longer cause stock Clevis to demand an ES512 signature from an ECMR key.
+- Permission-setting failures close and remove the newly created temporary key
+  file before returning the original error, with regression coverage for both keys.
 - Fuzz runs explicitly use the installed nightly compiler's host target, avoiding
   musl defaults from prebuilt cargo-fuzz binaries that break AddressSanitizer
   compilation on GNU/Linux CI runners.
