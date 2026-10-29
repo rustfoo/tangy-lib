@@ -35,7 +35,7 @@ jobs:
 
     - name: Upload test evidence
       if: ${{ !cancelled() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: junit-linux
         path: target/nextest/ci/junit.xml
@@ -43,7 +43,7 @@ jobs:
 
     - name: Upload installer test evidence
       if: ${{ !cancelled() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: junit-installer
         path: target/installer-junit/junit.xml
@@ -66,7 +66,7 @@ jobs:
       run: cargo nextest run --locked --profile ci
     - name: Upload test evidence
       if: ${{ !cancelled() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: junit-windows
         path: target/nextest/ci/junit.xml
@@ -103,7 +103,7 @@ jobs:
         cargo nextest run --locked --profile ci --features interop --test clevis
     - name: Upload test evidence
       if: ${{ !cancelled() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: junit-interop
         path: target/nextest/ci/junit.xml
@@ -134,7 +134,7 @@ jobs:
           --out ${{ runner.temp }}/evidence.json
     - name: Upload evidence record
       if: ${{ !cancelled() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: assurance-evidence
         path: |
