@@ -89,9 +89,11 @@ their normal package manager as described above.
 ## Platform coverage
 
 The minimum supported Rust version is **1.88.0**, declared as `rust-version = "1.88"`
-in `Cargo.toml`. CI runs the Rust build and tests on Linux
-and Windows, checks Rust 1.88.0 on Linux, and runs the Clevis compatibility tests
-in a separate Linux job.
+in `Cargo.toml`. CI runs the Rust build and tests on the latest stable compiler
+on Linux and Windows, checks Rust 1.88.0 on Linux, and runs the Clevis compatibility
+tests in a separate Linux job. The stable jobs follow new Rust releases
+automatically. Dependabot ignores `dtolnay/rust-toolchain` updates so the MSRV job
+stays pinned; raise it deliberately alongside `Cargo.toml`'s `rust-version`.
 
 Other Unix platforms have no CI coverage. See [key storage and rotation](KEY_STORAGE.md)
 for platform permission and crash-durability differences.

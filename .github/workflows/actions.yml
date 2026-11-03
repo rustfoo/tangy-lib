@@ -78,6 +78,7 @@ jobs:
     steps:
     
     - uses: actions/checkout@v7
+    # Keep pinned to Cargo.toml's rust-version; rust-stable tests the latest Rust.
     - uses: dtolnay/rust-toolchain@1.88.0
 
     - name: Build & Test
