@@ -2,6 +2,7 @@ name: Dependency advisories
 
 on:
   push:
+    branches: [main]
   pull_request:
   schedule:
     - cron: '23 6 * * *'

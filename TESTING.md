@@ -100,13 +100,14 @@ for platform permission and crash-durability differences.
 
 ## Release checks and fuzzing
 
-CI requires formatting, strict Clippy, compilation, release builds, tests and
+CI runs on pull requests and pushes to `main`, avoiding duplicate runs for PR
+branch pushes. It requires formatting, strict Clippy, compilation, release builds, tests and
 Rust 1.88.0 checks, retaining Linux, Windows and Clevis jobs. The assurance job
 checks the combined platform reports; a local Linux run alone cannot establish
 Windows behavior. Repository maintainers must select these jobs as required
 status checks in GitHub branch protection to enforce them before merging.
 
-Dependency advisories are checked on pushes, pull requests and a daily schedule
+Dependency advisories are checked on pushes to `main`, pull requests and a daily schedule
 with a freshly fetched RustSec database. Both the library and fuzz lockfiles are
 scanned, and warnings fail the check. Dependabot monitors Cargo dependencies
 (including fuzz tooling) and GitHub Actions weekly. To run the advisory checks:
@@ -118,7 +119,7 @@ cargo audit --file fuzz/Cargo.lock --deny warnings
 ```
 
 Two bounded, seeded fuzz targets exercise recovery request parsing and JWK
-conversion on pull requests, pushes and weekly runs. They run on nightly Rust
+conversion on pull requests, pushes to `main` and weekly runs. They run on nightly Rust
 with AddressSanitizer, separately from the library's stable/MSRV builds. See
 [fuzz/README.md](fuzz/README.md) for commands, resource bounds, seed provenance
 and crash reproduction. A bounded run is a regression check, not exhaustive

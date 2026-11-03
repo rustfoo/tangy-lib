@@ -2,6 +2,7 @@ name: Bounded fuzzing
 
 on:
   push:
+    branches: [main]
   pull_request:
   schedule:
     - cron: '41 6 * * 1'
